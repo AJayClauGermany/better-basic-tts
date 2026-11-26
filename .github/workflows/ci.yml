@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            artifact: better-basic-tts-linux-x86_64
+          - name: macOS
+            os: macos-latest
+            artifact: better-basic-tts-macos-arm64
+          - name: Windows
+            os: windows-latest
+            artifact: better-basic-tts-windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libasound2-dev \
+            libfontconfig-dev libfreetype-dev espeak-ng
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Lint
+        if: runner.os == 'Linux'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build release
+        run: cargo build --release -p better-basic-tts
+
+      - name: Smoke test (CLI)
+        shell: bash
+        run: |
+          ./target/release/better-basic-tts --version
+          ./target/release/better-basic-tts engines || true
+          ./target/release/better-basic-tts explain 'Use Vec<String> when a < b.'
+
+      - name: Smoke test (speak to a file)
+        shell: bash
+        run: |
+          ./target/release/better-basic-tts speak --output hello.wav 'Hello from Better Basic TTS. This is the second sentence.'
+          ls -l hello.wav
+
+      - name: Bundle macOS app
+        if: runner.os == 'macOS'
+        run: scripts/bundle-macos.sh
+
+      - name: Upload (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/release/better-basic-tts
+
+      - name: Upload (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/release/Better-Basic-TTS-macos.zip
+
+      - name: Upload (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/release/better-basic-tts.exe

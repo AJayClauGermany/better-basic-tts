@@ -296,9 +296,11 @@ mod tests {
         let path = dir.path().join("nested").join("settings.toml");
         assert_eq!(Settings::load(&path).unwrap(), Settings::default());
 
-        let mut s = Settings::default();
-        s.rate = 1.7;
-        s.voice = "Alex".into();
+        let mut s = Settings {
+            rate: 1.7,
+            voice: "Alex".into(),
+            ..Default::default()
+        };
         s.roles.heading.voice = "Samantha".into();
         s.roles.code.skip = true;
         s.substitutions.push(Substitution {
@@ -336,8 +338,10 @@ mod tests {
 
     #[test]
     fn skip_roles() {
-        let mut s = Settings::default();
-        s.interpreter = InterpreterKind::Markdown;
+        let mut s = Settings {
+            interpreter: InterpreterKind::Markdown,
+            ..Default::default()
+        };
         s.roles.code.skip = true;
         let u = s.prepare("Text.\n\n```\ncode here\n```\n\nMore.");
         assert_eq!(u.len(), 2);

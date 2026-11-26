@@ -166,7 +166,11 @@ pub fn serve(on_request: impl Fn(Request) + Send + 'static) -> Result<Server> {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { continue };
                 let mut bytes = Vec::new();
-                if conn.take(MAX_REQUEST_BYTES).read_to_end(&mut bytes).is_err() {
+                if conn
+                    .take(MAX_REQUEST_BYTES)
+                    .read_to_end(&mut bytes)
+                    .is_err()
+                {
                     continue;
                 }
                 // The liveness probe in `serve` connects without sending.

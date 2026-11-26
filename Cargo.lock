@@ -726,7 +726,9 @@ dependencies = [
  "global-hotkey",
  "interprocess",
  "log",
+ "raw-window-handle",
  "which 8.0.6",
+ "x11rb",
 ]
 
 [[package]]
@@ -741,6 +743,7 @@ dependencies = [
  "flume",
  "gpui-kit",
  "log",
+ "raw-window-handle",
 ]
 
 [[package]]

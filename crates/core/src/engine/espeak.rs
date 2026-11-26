@@ -132,7 +132,9 @@ mod tests {
             return;
         };
         assert!(!engine.voices().unwrap().is_empty());
-        let slow = engine.synthesize(&SynthRequest::new("Hello world.")).unwrap();
+        let slow = engine
+            .synthesize(&SynthRequest::new("Hello world."))
+            .unwrap();
         assert!(slow.duration_secs() > 0.3);
         let mut req = SynthRequest::new("Hello world.");
         req.rate = 2.0;

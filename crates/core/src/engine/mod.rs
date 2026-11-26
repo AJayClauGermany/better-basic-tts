@@ -157,7 +157,10 @@ impl EngineRegistry {
         // neural voice wins over the robotic fallback when engine = "auto".
         for cfg in custom {
             if cfg.id.is_empty() || engines.iter().any(|e| e.id() == cfg.id) {
-                log::warn!("ignoring custom engine with empty or duplicate id {:?}", cfg.id);
+                log::warn!(
+                    "ignoring custom engine with empty or duplicate id {:?}",
+                    cfg.id
+                );
                 continue;
             }
             engines.push(Arc::new(CommandEngine::new(cfg.clone())));
@@ -225,10 +228,7 @@ pub(crate) fn temp_path(ext: &str) -> std::path::PathBuf {
 }
 
 /// Run a command, feed `stdin`, return stdout. Never goes through a shell.
-pub(crate) fn run_command(
-    mut cmd: std::process::Command,
-    stdin: Option<&[u8]>,
-) -> Result<Vec<u8>> {
+pub(crate) fn run_command(mut cmd: std::process::Command, stdin: Option<&[u8]>) -> Result<Vec<u8>> {
     use anyhow::{bail, Context};
     use std::io::Write;
     use std::process::Stdio;

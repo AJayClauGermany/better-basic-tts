@@ -37,10 +37,10 @@ impl AngleBrackets {
 
     pub fn label(self) -> &'static str {
         match self {
-            AngleBrackets::Smart => "Smart (tags, generics, comparisons)",
-            AngleBrackets::Literal => "Literal (less than / greater than)",
+            AngleBrackets::Smart => "Smart",
+            AngleBrackets::Literal => "Literal",
             AngleBrackets::StripTags => "Remove HTML tags",
-            AngleBrackets::Silent => "Silent (read the content only)",
+            AngleBrackets::Silent => "Silent",
         }
     }
 }
@@ -100,19 +100,16 @@ pub(crate) struct Speakable {
     substitutions: Vec<(Regex, String, Vec<Role>)>,
 }
 
-static URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)<?\b((?:https?://|www\.)[^\s<>"')\]]+)>?"#).unwrap()
-});
+static URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)<?\b((?:https?://|www\.)[^\s<>"')\]]+)>?"#).unwrap());
 static RULER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(={4,}|-{4,}|_{4,}|\*{4,}|#{4,}|~{4,})").unwrap());
 static LEADING_QUOTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*>)+\s?").unwrap());
 static COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--(.*?)-->").unwrap());
-static TAG: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<(/?)([A-Za-z][A-Za-z0-9:-]*)(\s+[^<>]*?)?\s*(/?)>"#).unwrap()
-});
+static TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"<(/?)([A-Za-z][A-Za-z0-9:-]*)(\s+[^<>]*?)?\s*(/?)>"#).unwrap());
 static SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]{2,}").unwrap());
-static SPACE_BEFORE_PUNCT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r" +([,.;:!?])").unwrap());
+static SPACE_BEFORE_PUNCT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" +([,.;:!?])").unwrap());
 
 impl Speakable {
     pub(crate) fn new(opts: &SpeakableOptions) -> Self {
@@ -195,14 +192,13 @@ pub(crate) fn make_speakable(sentence: &str, role: Role, opts: &SpeakableOptions
 }
 
 fn domain_of(url: &str) -> String {
-    let rest = url
-        .split_once("://")
-        .map(|(_, r)| r)
-        .unwrap_or(url);
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let host = host.rsplit('@').next().unwrap_or(host);
     let host = host.split(':').next().unwrap_or(host);
-    host.trim_start_matches("www.").trim_end_matches('.').to_string()
+    host.trim_start_matches("www.")
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn angle_brackets(text: &str, mode: AngleBrackets) -> String {
@@ -222,7 +218,8 @@ fn angle_brackets(text: &str, mode: AngleBrackets) -> String {
 }
 
 fn literal(text: &str) -> String {
-    text.replace('<', " less than ").replace('>', " greater than ")
+    text.replace('<', " less than ")
+        .replace('>', " greater than ")
 }
 
 fn smart(text: &str) -> String {
@@ -286,9 +283,9 @@ fn generics(text: &str) -> String {
         let c = chars[i];
         if c == '<' {
             let prev_is_ident = i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
-            let next_ok = chars
-                .get(i + 1)
-                .is_some_and(|n| n.is_alphanumeric() || matches!(n, '_' | '&' | '\'' | '[' | '(' | '*'));
+            let next_ok = chars.get(i + 1).is_some_and(|n| {
+                n.is_alphanumeric() || matches!(n, '_' | '&' | '\'' | '[' | '(' | '*')
+            });
             if prev_is_ident && next_ok && generic_closes(&chars, i) {
                 out.push_str(" of ");
                 depth += 1;
@@ -369,7 +366,10 @@ mod tests {
         let s = smart("<script>alert('xss')</script>");
         assert_eq!(s, "script tag alert('xss') closing script tag");
         for mode in AngleBrackets::ALL {
-            let s = with(mode, "<speak><prosody rate=\"x-fast\">hi</prosody></speak> <");
+            let s = with(
+                mode,
+                "<speak><prosody rate=\"x-fast\">hi</prosody></speak> <",
+            );
             assert!(!s.contains('<') && !s.contains('>'), "{mode:?}: {s}");
             assert!(s.contains("hi"));
         }
@@ -392,7 +392,10 @@ mod tests {
             with(AngleBrackets::Literal, "<b>"),
             "less than b greater than"
         );
-        assert_eq!(with(AngleBrackets::StripTags, "a <b>bold</b> c"), "a bold c");
+        assert_eq!(
+            with(AngleBrackets::StripTags, "a <b>bold</b> c"),
+            "a bold c"
+        );
         assert_eq!(with(AngleBrackets::Silent, "a <b> c"), "a b c");
     }
 

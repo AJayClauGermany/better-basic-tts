@@ -24,7 +24,11 @@ pub fn sanitize(raw: &str) -> String {
             '\u{2028}' => out.push('\n'),
             '\u{2029}' => out.push_str("\n\n"),
             // Odd spaces.
-            '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}'
+            '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{202F}'
+            | '\u{205F}'
             | '\u{3000}' => out.push(' '),
             // Zero-width and bidi control characters, BOM, soft hyphen.
             '\u{200B}'..='\u{200F}'

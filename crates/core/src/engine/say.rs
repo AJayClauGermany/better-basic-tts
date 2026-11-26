@@ -101,7 +101,11 @@ impl Engine for SayEngine {
 
         let wpm = (BASE_WPM * req.rate).round().clamp(60.0, 720.0) as i32;
         let mut cmd = Command::new(&self.program);
-        if let Some(voice) = req.voice.as_deref().filter(|v| !v.is_empty() && !v.starts_with('-')) {
+        if let Some(voice) = req
+            .voice
+            .as_deref()
+            .filter(|v| !v.is_empty() && !v.starts_with('-'))
+        {
             cmd.arg("-v").arg(voice);
         }
         cmd.arg("-r")

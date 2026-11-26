@@ -38,7 +38,9 @@ pub fn list_engines(settings: &Settings) -> Result<()> {
     if registry.is_empty() {
         bail!(EngineRegistry::missing_engine_help());
     }
-    let active = registry.resolve(&settings.engine).map(|e| e.id().to_string());
+    let active = registry
+        .resolve(&settings.engine)
+        .map(|e| e.id().to_string());
     let mut out = String::new();
     for engine in registry.engines() {
         let mark = if Some(engine.id()) == active.as_deref() {
@@ -60,7 +62,11 @@ pub fn list_voices(settings: &Settings) -> Result<()> {
         let _ = writeln!(out, "{} reports no voices.", engine.name());
     }
     for voice in voices {
-        let _ = writeln!(out, "{:<36} {:<12} {}", voice.id, voice.language, voice.name);
+        let _ = writeln!(
+            out,
+            "{:<36} {:<12} {}",
+            voice.id, voice.language, voice.name
+        );
     }
     print_all(&out);
     Ok(())

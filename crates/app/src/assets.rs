@@ -22,6 +22,10 @@ macro_rules! icons {
 
 icons!("play", "pause", "stop", "rewind", "forward", "turtle", "rabbit");
 
+// Lucide icons used by the settings window that are not part of the
+// component library's default selection.
+gpui_kit::assets::icon_assets!(ExtraIcons, [AudioLines, Users, Keyboard]);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Glyph {
     Play,
@@ -63,11 +67,15 @@ impl AssetSource for Assets {
                 .find(|(name, _)| *name == path)
                 .map(|(_, bytes)| Cow::Borrowed(*bytes)));
         }
+        if let Some(bytes) = ExtraIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
         gpui_kit::assets::Assets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut all = gpui_kit::assets::Assets.list(path)?;
+        all.extend(ExtraIcons.list(path)?);
         all.extend(
             ICONS
                 .iter()

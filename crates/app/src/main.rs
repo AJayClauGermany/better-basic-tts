@@ -18,6 +18,7 @@ mod ui;
 pub const APP_ID: &str = "better-basic-tts";
 
 fn main() -> std::process::ExitCode {
+    bbtts_platform::console::attach_to_parent();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format_timestamp(None)
         .init();

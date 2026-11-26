@@ -66,6 +66,7 @@ pub fn run(settings_path: PathBuf, initial: Option<Request>) -> Result<()> {
                 }
             };
             cx.global_mut::<Tts>().panel = Some(handle);
+            state::apply_always_on_top(cx);
 
             // The panel is the application: closing it quits.
             cx.on_window_closed(move |cx, closed| {

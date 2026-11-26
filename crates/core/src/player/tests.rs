@@ -47,7 +47,11 @@ impl Engine for FakeEngine {
 fn utterances(n: usize) -> Vec<Utterance> {
     (0..n)
         .map(|i| Utterance {
-            role: if i == 0 { Role::Heading } else { Role::Paragraph },
+            role: if i == 0 {
+                Role::Heading
+            } else {
+                Role::Paragraph
+            },
             spoken: format!("sentence {i}"),
             display: format!("Sentence {i}"),
             ends_block: i == 0 || i + 1 == n,
@@ -111,7 +115,9 @@ fn plays_through_and_returns_to_idle() {
 
     // Play again from idle restarts from the top.
     p.toggle_pause();
-    wait_for(&p, "replay", |s| s.status == Status::Playing && s.index == 0);
+    wait_for(&p, "replay", |s| {
+        s.status == Status::Playing && s.index == 0
+    });
 }
 
 #[test]
@@ -135,16 +141,24 @@ fn next_previous_and_stop() {
     p.speak(utterances(4), "");
     wait_for(&p, "playing", |s| s.status == Status::Playing);
     p.next();
-    wait_for(&p, "index 1", |s| s.index == 1 && s.status == Status::Playing);
+    wait_for(&p, "index 1", |s| {
+        s.index == 1 && s.status == Status::Playing
+    });
     p.next();
-    wait_for(&p, "index 2", |s| s.index == 2 && s.status == Status::Playing);
+    wait_for(&p, "index 2", |s| {
+        s.index == 2 && s.status == Status::Playing
+    });
     // Just started this sentence, so previous goes back one.
     p.previous();
-    wait_for(&p, "back to 1", |s| s.index == 1 && s.status == Status::Playing);
+    wait_for(&p, "back to 1", |s| {
+        s.index == 1 && s.status == Status::Playing
+    });
     p.previous();
     p.previous();
     p.previous();
-    wait_for(&p, "clamped at 0", |s| s.index == 0 && s.status == Status::Playing);
+    wait_for(&p, "clamped at 0", |s| {
+        s.index == 0 && s.status == Status::Playing
+    });
     p.stop();
     let snap = wait_for(&p, "stopped", |s| s.status == Status::Idle);
     assert_eq!(snap.index, 0);
@@ -153,20 +167,22 @@ fn next_previous_and_stop() {
 
 #[test]
 fn previous_restarts_sentence_when_well_into_it() {
-    // 10x clock: 1.5 s of audio passes in 150 ms.
-    let p = player(FakeEngine::new(), 10.0);
-    let mut long = utterances(3);
-    for u in &mut long {
-        u.spoken = "long".into();
-    }
-    // Slow rate makes each sentence 2 s of audio.
+    // 4x clock and half speed: each sentence is 2 s of audio, 500 ms real.
+    let p = player(FakeEngine::new(), 4.0);
     p.set_rate(0.5);
-    p.speak(long, "");
-    wait_for(&p, "second sentence", |s| s.index == 1 && s.status == Status::Playing);
-    std::thread::sleep(Duration::from_millis(170));
+    p.speak(utterances(3), "");
+    wait_for(&p, "second sentence", |s| {
+        s.index == 1 && s.status == Status::Playing
+    });
+    // 420 ms real = 1.68 s into the sentence: past the restart threshold.
+    std::thread::sleep(Duration::from_millis(420));
     p.previous();
     std::thread::sleep(Duration::from_millis(40));
-    assert_eq!(p.snapshot().index, 1, "should restart sentence 1, not go to 0");
+    assert_eq!(
+        p.snapshot().index,
+        1,
+        "should restart sentence 1, not go to 0"
+    );
 }
 
 #[test]
@@ -186,7 +202,9 @@ fn rate_changes_apply_immediately_and_clamp() {
     wait_for(&p, "playing", |s| s.status == Status::Playing);
     p.faster();
     p.faster();
-    let snap = wait_for(&p, "rate 1.2", |s| (s.rate - 1.2).abs() < 1e-4 && s.status == Status::Playing);
+    let snap = wait_for(&p, "rate 1.2", |s| {
+        (s.rate - 1.2).abs() < 1e-4 && s.status == Status::Playing
+    });
     assert_eq!(snap.index, 0, "speed change must not skip sentences");
     assert!(engine
         .log
@@ -222,7 +240,9 @@ fn skipping_while_paused_stays_paused() {
     std::thread::sleep(Duration::from_millis(60));
     assert_eq!(p.snapshot().status, Status::Paused);
     p.toggle_pause();
-    wait_for(&p, "playing", |s| s.status == Status::Playing && s.index == 1);
+    wait_for(&p, "playing", |s| {
+        s.status == Status::Playing && s.index == 1
+    });
 }
 
 #[test]
@@ -239,7 +259,9 @@ fn engine_failure_surfaces_as_error() {
     assert!(snap.error.unwrap().contains("engine exploded"));
     // A new request clears the error.
     p.speak(utterances(1), "");
-    wait_for(&p, "playing", |s| s.status == Status::Playing && s.error.is_none());
+    wait_for(&p, "playing", |s| {
+        s.status == Status::Playing && s.error.is_none()
+    });
 }
 
 #[test]
@@ -299,10 +321,15 @@ fn reconfigure_mid_playback_uses_new_voice() {
         {
             break;
         }
-        assert!(start.elapsed() < Duration::from_secs(5), "voice change not applied");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "voice change not applied"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
-    wait_for(&p, "still playing sentence 0", |s| s.status == Status::Playing && s.index == 0);
+    wait_for(&p, "still playing sentence 0", |s| {
+        s.status == Status::Playing && s.index == 0
+    });
 }
 
 #[test]

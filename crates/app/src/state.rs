@@ -61,8 +61,7 @@ impl Tts {
             }),
             None => Vec::new(),
         };
-        self.voices
-            .sort_by(|a, b| a.label().to_lowercase().cmp(&b.label().to_lowercase()));
+        self.voices.sort_by_key(|v| v.label().to_lowercase());
     }
 
     fn apply_hotkeys(&mut self) {
@@ -101,7 +100,9 @@ pub fn init(settings_path: PathBuf, cx: &mut App) {
         Ok(s) => (s, None),
         Err(e) => (
             Settings::default(),
-            Some(format!("{e:#}. Using defaults; the file was left untouched.")),
+            Some(format!(
+                "{e:#}. Using defaults; the file was left untouched."
+            )),
         ),
     };
     let registry = EngineRegistry::detect(&settings.engines);
@@ -289,6 +290,29 @@ pub fn show_panel(cx: &mut App) {
     }
 }
 
+/// Keep the control panel above other windows, or stop doing so.
+///
+/// Windows and X11 are handled here; on macOS the panel is created as a
+/// floating panel (so a change applies at the next start), and Wayland has
+/// no way for an application to ask for this.
+pub fn apply_always_on_top(cx: &mut App) {
+    let tts = cx.global::<Tts>();
+    let on_top = tts.settings.always_on_top;
+    let Some(panel) = tts.panel else { return };
+    let _ = panel.update(cx, |_, window, _| {
+        use raw_window_handle::HasWindowHandle;
+        let window: &gpui_kit::Window = window;
+        match HasWindowHandle::window_handle(window) {
+            Ok(handle) => {
+                if let Err(e) = bbtts_platform::window::set_always_on_top(handle.as_raw(), on_top) {
+                    log::warn!("could not change always-on-top: {e:#}");
+                }
+            }
+            Err(e) => log::warn!("no native window handle: {e}"),
+        }
+    });
+}
+
 /// Change settings, persist them and apply them to the running player.
 pub fn update_settings(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     let tts = cx.global_mut::<Tts>();
@@ -325,7 +349,11 @@ pub fn update_settings(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     if voice_changed {
         tts.player.configure(tts.player_config());
     }
+    let on_top_changed = tts.settings.always_on_top != before.always_on_top;
     save(tts);
+    if on_top_changed {
+        apply_always_on_top(cx);
+    }
     cx.refresh_windows();
 }
 

@@ -220,7 +220,14 @@ impl Render for Panel {
                     .px_3()
                     .pt_2()
                     .gap_2()
-                    .child(transport("slower", Glyph::Turtle, "Slower (↓)", Do::Slower, can_slow, cx))
+                    .child(transport(
+                        "slower",
+                        Glyph::Turtle,
+                        "Slower (↓)",
+                        Do::Slower,
+                        can_slow,
+                        cx,
+                    ))
                     .child(transport(
                         "previous",
                         Glyph::Rewind,
@@ -229,8 +236,22 @@ impl Render for Panel {
                         active,
                         cx,
                     ))
-                    .child(transport("play-pause", play_icon, play_tip, Do::PauseResume, true, cx))
-                    .child(transport("stop", Glyph::Stop, "Stop (Esc)", Do::Stop, active, cx))
+                    .child(transport(
+                        "play-pause",
+                        play_icon,
+                        play_tip,
+                        Do::PauseResume,
+                        true,
+                        cx,
+                    ))
+                    .child(transport(
+                        "stop",
+                        Glyph::Stop,
+                        "Stop (Esc)",
+                        Do::Stop,
+                        active,
+                        cx,
+                    ))
                     .child(transport(
                         "next",
                         Glyph::Forward,
@@ -239,7 +260,14 @@ impl Render for Panel {
                         active,
                         cx,
                     ))
-                    .child(transport("faster", Glyph::Rabbit, "Faster (↑)", Do::Faster, can_fast, cx)),
+                    .child(transport(
+                        "faster",
+                        Glyph::Rabbit,
+                        "Faster (↑)",
+                        Do::Faster,
+                        can_fast,
+                        cx,
+                    )),
             )
             .child(
                 h_flex()

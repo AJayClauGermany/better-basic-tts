@@ -86,7 +86,10 @@ impl PlayerConfig {
 }
 
 enum Command {
-    Speak { utterances: Vec<Utterance>, title: String },
+    Speak {
+        utterances: Vec<Utterance>,
+        title: String,
+    },
     TogglePause,
     Pause,
     Stop,
@@ -312,7 +315,11 @@ impl JobQueue {
     }
 
     fn done(&self, generation: u64, key: Key) {
-        self.state.lock().unwrap().running.remove(&(generation, key));
+        self.state
+            .lock()
+            .unwrap()
+            .running
+            .remove(&(generation, key));
     }
 
     fn shutdown(&self) {
@@ -384,7 +391,8 @@ impl Worker {
     fn run(&mut self, rx: flume::Receiver<Msg>) {
         loop {
             match rx.recv_timeout(TICK) {
-                Ok(Msg::Command(Command::Shutdown)) | Err(flume::RecvTimeoutError::Disconnected) => {
+                Ok(Msg::Command(Command::Shutdown))
+                | Err(flume::RecvTimeoutError::Disconnected) => {
                     self.out.stop();
                     self.jobs.shutdown();
                     return;

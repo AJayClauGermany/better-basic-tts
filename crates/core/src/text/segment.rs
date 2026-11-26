@@ -14,9 +14,9 @@ const SHORT_LINE_CHARS: usize = 60;
 
 const ABBREVIATIONS: &[&str] = &[
     "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "e.g", "i.e", "cf", "no",
-    "fig", "eq", "vol", "approx", "inc", "ltd", "co", "corp", "dept", "est", "gen", "gov",
-    "hon", "rev", "sgt", "col", "capt", "lt", "mt", "jan", "feb", "mar", "apr", "jun", "jul",
-    "aug", "sep", "sept", "oct", "nov", "dec", "a.m", "p.m", "u.s", "u.k", "ph.d", "al",
+    "fig", "eq", "vol", "approx", "inc", "ltd", "co", "corp", "dept", "est", "gen", "gov", "hon",
+    "rev", "sgt", "col", "capt", "lt", "mt", "jan", "feb", "mar", "apr", "jun", "jul", "aug",
+    "sep", "sept", "oct", "nov", "dec", "a.m", "p.m", "u.s", "u.k", "ph.d", "al",
 ];
 
 pub fn split_sentences(text: &str) -> Vec<String> {
@@ -68,7 +68,10 @@ fn is_terminator(c: char) -> bool {
 }
 
 fn is_closer(c: char) -> bool {
-    matches!(c, '"' | '\'' | ')' | ']' | '}' | '”' | '’' | '»' | '*' | '_')
+    matches!(
+        c,
+        '"' | '\'' | ')' | ']' | '}' | '”' | '’' | '»' | '*' | '_'
+    )
 }
 
 fn split_unit(text: &str) -> Vec<String> {
@@ -236,7 +239,10 @@ mod tests {
 
     #[test]
     fn short_lines_are_boundaries_long_lines_wrap() {
-        assert_eq!(split_sentences("Title\nSubtitle"), vec!["Title", "Subtitle"]);
+        assert_eq!(
+            split_sentences("Title\nSubtitle"),
+            vec!["Title", "Subtitle"]
+        );
         let wrapped = "This is a long line of prose that was hard wrapped by an editor at eighty\ncolumns and continues here.";
         assert_eq!(split_sentences(wrapped).len(), 1);
     }
@@ -246,7 +252,9 @@ mod tests {
         let long = "word ".repeat(200);
         let parts = split_sentences(&long);
         assert!(parts.len() >= 3);
-        assert!(parts.iter().all(|p| p.chars().count() <= MAX_SENTENCE_CHARS));
+        assert!(parts
+            .iter()
+            .all(|p| p.chars().count() <= MAX_SENTENCE_CHARS));
         assert_eq!(parts.join(" ").split_whitespace().count(), 200);
     }
 

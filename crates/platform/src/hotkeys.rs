@@ -65,9 +65,21 @@ pub fn parse(shortcut: &str) -> Result<HotKey> {
         })
         .collect::<Vec<_>>()
         .join("+");
-    normalized
+    let hotkey = normalized
         .parse::<HotKey>()
-        .map_err(|e| anyhow!("\"{shortcut}\" is not a valid shortcut: {e}"))
+        .map_err(|e| anyhow!("\"{shortcut}\" is not a valid shortcut: {e}"))?;
+    // A bare letter as a global shortcut would swallow that key in every
+    // application. Only function and media keys may stand alone.
+    let key = format!("{:?}", hotkey.key);
+    let standalone_ok = (key.starts_with('F') && key[1..].chars().all(|c| c.is_ascii_digit()))
+        || key.starts_with("Media")
+        || key.starts_with("AudioVolume");
+    if hotkey.mods.is_empty() && !standalone_ok {
+        return Err(anyhow!(
+            "\"{shortcut}\" needs a modifier such as Ctrl, Alt, Shift or Cmd"
+        ));
+    }
+    Ok(hotkey)
 }
 
 /// Why global shortcuts cannot work in this session, if they cannot.
@@ -198,5 +210,9 @@ mod tests {
         assert!(parse("Ctrl+Alt+").is_err());
         assert!(parse("Ctrl+S+A").is_err());
         assert!(parse("Banana").is_err());
+        // No bare keys: they would be swallowed system-wide.
+        assert!(parse("S").is_err());
+        assert!(parse("Space").is_err());
+        assert!(parse("Shift+F5").is_ok());
     }
 }

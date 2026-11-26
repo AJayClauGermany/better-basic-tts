@@ -12,8 +12,10 @@ flume = "0.12"
 global-hotkey = "0.10"
 interprocess = "2.4"
 log = "0.4"
+raw-window-handle = "0.6"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 which = "8"
 

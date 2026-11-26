@@ -154,16 +154,19 @@ fn committed_input(
                         .default_value(current.clone())
                         .placeholder(placeholder)
                 });
-                let _subscription =
-                    cx.subscribe(&input, move |state: &mut State, input, event: &InputEvent, cx| {
+                let _subscription = cx.subscribe(
+                    &input,
+                    move |state: &mut State, input, event: &InputEvent, cx| {
                         if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                            let text: SharedString = input.read(cx).value().trim().to_string().into();
+                            let text: SharedString =
+                                input.read(cx).value().trim().to_string().into();
                             if text != state.committed {
                                 state.committed = text.clone();
                                 set_value(text, cx);
                             }
                         }
-                    });
+                    },
+                );
                 State {
                     input,
                     committed: current,
@@ -181,7 +184,7 @@ fn committed_input(
             }
         });
         let input = state.read(cx).input.clone();
-        Input::new(&input).with_size(options.size()).w_64()
+        Input::new(&input).with_size(options.size()).w_48()
     })
 }
 
@@ -236,7 +239,7 @@ fn voice_page(cx: &App) -> SettingPage {
         .default_open(true)
         .group(
             SettingGroup::new()
-                .title("Voice")
+                .title("Engine and voice")
                 .description(engine_note)
                 .item(
                     SettingItem::new(
@@ -273,7 +276,9 @@ fn voice_page(cx: &App) -> SettingPage {
                         )
                         .default_value(1.0),
                     )
-                    .description("1.0 is the voice's normal speed. Same as the turtle and the rabbit."),
+                    .description(
+                        "1.0 is the voice's normal speed. Same as the turtle and the rabbit.",
+                    ),
                 )
                 .item(SettingItem::new(
                     "Volume (%)",
@@ -349,8 +354,9 @@ fn text_page() -> SettingPage {
                         .default_value("smart"),
                     )
                     .description(
-                        "Smart reads \"a < b\" as \"a less than b\", \"<div>\" as \"div tag\" \
-                         and \"Vec<String>\" as \"Vec of String\".",
+                        "Smart reads \"a < b\" as \"a less than b\", \"<div>\" as \"div tag\" and \
+                         \"Vec<String>\" as \"Vec of String\". Literal always says \"less than\" and \
+                         \"greater than\". Silent reads only what is inside.",
                     ),
                 )
                 .item(SettingItem::new(
@@ -549,22 +555,20 @@ fn general_page(cx: &App) -> SettingPage {
     SettingPage::new("General")
         .icon(Icon::new(IconName::Settings))
         .group(
-            SettingGroup::new()
-                .title("Window")
-                .item(
-                    SettingItem::new(
-                        "Keep on top",
-                        SettingField::switch(
-                            get(|s| s.always_on_top),
-                            set(|s, v: bool| s.always_on_top = v),
-                        )
-                        .default_value(true),
+            SettingGroup::new().title("Window").item(
+                SettingItem::new(
+                    "Keep on top",
+                    SettingField::switch(
+                        get(|s| s.always_on_top),
+                        set(|s, v: bool| s.always_on_top = v),
                     )
-                    .description(
-                        "Keep the controls above other windows. Applies the next time the app starts.",
-                    ),
+                    .default_value(true),
                 )
-
+                .description(
+                    "Keep the controls above other windows. On macOS this applies the next time \
+                         the app starts; Wayland leaves it to the compositor.",
+                ),
+            ),
         )
         .group(
             SettingGroup::new()

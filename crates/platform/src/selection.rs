@@ -81,7 +81,11 @@ mod platform {
         if primary {
             cmd.arg("--primary");
         }
-        let out = cmd.stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        let out = cmd
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
