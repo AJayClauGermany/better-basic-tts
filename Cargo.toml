@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BSL-1.0"
+repository = "https://github.com/AJayClauGermany/better-basic-tts"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
