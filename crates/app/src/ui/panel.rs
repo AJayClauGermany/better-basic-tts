@@ -273,17 +273,25 @@ impl Render for Panel {
             .child(
                 h_flex()
                     .px_3()
-                    .pt_2()
+                    .pt_1p5()
                     .pb_2()
                     .gap_3()
-                    .items_center()
+                    .items_start()
                     .text_xs()
                     .child(
                         div()
                             .id("status")
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            // Problems get two lines; they tend to be longer
+                            // and matter more than the sentence preview.
+                            .map(|this| {
+                                if status_is_problem {
+                                    this.line_clamp(2)
+                                } else {
+                                    this.truncate()
+                                }
+                            })
                             .text_color(if status_is_problem {
                                 theme.danger
                             } else {

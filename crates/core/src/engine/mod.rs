@@ -199,8 +199,7 @@ impl EngineRegistry {
     /// What to tell the user when no engine was found.
     pub fn missing_engine_help() -> &'static str {
         if cfg!(target_os = "linux") {
-            "No speech engine found. Install espeak-ng (for example `sudo apt install espeak-ng`) \
-             or configure a local engine such as Piper or KittenTTS in the settings file."
+            "No speech engine found. Install espeak-ng, or add a local engine in the settings file."
         } else if cfg!(target_os = "macos") {
             "The system speech command /usr/bin/say was not found."
         } else {
