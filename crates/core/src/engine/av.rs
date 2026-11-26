@@ -77,17 +77,70 @@ const FIRST_AUDIO_TIMEOUT: Duration = Duration::from_secs(12);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `AVSpeechUtterance.rate` runs from 0 to 1 with 0.5 as the voice's normal
-/// speed. The scale is not linear in speed; this is a first approximation
-/// (1.0 on the scale taken as four times normal) to be replaced by measured
-/// values.
+/// speed, and it is not linear in speed. These pairs of (speed multiplier,
+/// rate value) were measured with the default system voice by timing the
+/// same sentence at each rate value.
+const RATE_SCALE: [(f32, f32); 13] = [
+    (0.589, 0.10),
+    (0.715, 0.20),
+    (0.769, 0.30),
+    (0.908, 0.40),
+    (1.000, 0.50),
+    (1.292, 0.55),
+    (1.591, 0.60),
+    (1.825, 0.65),
+    (2.108, 0.70),
+    (2.483, 0.75),
+    (2.802, 0.80),
+    (3.508, 0.90),
+    (4.026, 1.00),
+];
+
+/// The rate value that makes the voice `multiplier` times its normal speed.
 fn utterance_rate(multiplier: f32) -> f32 {
-    let m = multiplier.clamp(0.25, 4.0);
-    if m >= 1.0 {
-        0.5 + 0.25 * m.log2()
+    let m = if multiplier.is_finite() {
+        multiplier
     } else {
-        0.5 * m
+        1.0
+    };
+    let (first, last) = (RATE_SCALE[0], RATE_SCALE[RATE_SCALE.len() - 1]);
+    if m >= last.0 {
+        return last.1;
     }
-    .clamp(0.0, 1.0)
+    // Below the slowest measured point, carry on along the first segment.
+    let segment = if m <= first.0 {
+        (first, RATE_SCALE[1])
+    } else {
+        RATE_SCALE
+            .windows(2)
+            .map(|w| (w[0], w[1]))
+            .find(|(_, hi)| m <= hi.0)
+            .unwrap_or((RATE_SCALE[RATE_SCALE.len() - 2], last))
+    };
+    let ((m0, r0), (m1, r1)) = segment;
+    (r0 + (m - m0) / (m1 - m0) * (r1 - r0)).clamp(0.0, 1.0)
+}
+
+thread_local! {
+    /// One synthesizer per synthesis thread, kept between sentences.
+    static SYNTHESIZER: std::cell::RefCell<Option<Retained<AVSpeechSynthesizer>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Find a voice by its identifier or, failing that, by its name (so a voice
+/// chosen for the `say` engine, which goes by names, still applies).
+fn find_voice(id_or_name: &str) -> Option<Retained<AVSpeechSynthesisVoice>> {
+    // SAFETY: plain Objective-C calls.
+    unsafe {
+        if let Some(voice) =
+            AVSpeechSynthesisVoice::voiceWithIdentifier(&NSString::from_str(id_or_name))
+        {
+            return Some(voice);
+        }
+        AVSpeechSynthesisVoice::speechVoices()
+            .iter()
+            .find(|v| v.name().to_string().eq_ignore_ascii_case(id_or_name))
+    }
 }
 
 /// Render `text`. `raw_rate`, if given, is put on the utterance as is
@@ -99,6 +152,7 @@ fn render(
     raw_rate: Option<f32>,
     pitch: f32,
     volume: f32,
+    reuse: bool,
 ) -> Result<Rendered> {
     let (tx, rx) = mpsc::channel::<(Chunk, String)>();
     let tx = std::sync::Mutex::new(tx);
@@ -156,13 +210,15 @@ fn render(
     // SAFETY: plain Objective-C calls with valid arguments. The synthesizer
     // is kept alive until we stop listening.
     let synthesizer: Retained<AVSpeechSynthesizer> = unsafe {
-        let synthesizer = AVSpeechSynthesizer::new();
+        let kept = if reuse {
+            SYNTHESIZER.with(|slot| slot.borrow_mut().take())
+        } else {
+            None
+        };
+        let synthesizer = kept.unwrap_or_else(|| AVSpeechSynthesizer::new());
         let utterance = AVSpeechUtterance::speechUtteranceWithString(&NSString::from_str(text));
-        if let Some(id) = voice.filter(|v| !v.is_empty()) {
-            let found = AVSpeechSynthesisVoice::voiceWithIdentifier(&NSString::from_str(id));
-            if let Some(found) = found {
-                utterance.setVoice(Some(&found));
-            }
+        if let Some(found) = voice.filter(|v| !v.is_empty()).and_then(find_voice) {
+            utterance.setVoice(Some(&found));
         }
         utterance.setRate(raw_rate.unwrap_or_else(|| utterance_rate(rate)));
         utterance.setPitchMultiplier(pitch.clamp(0.5, 2.0));
@@ -218,7 +274,13 @@ fn render(
             }
         }
     }
-    drop(synthesizer);
+    // A synthesizer that finished cleanly is kept for the next sentence; one
+    // that timed out or failed was dropped above and is not reused.
+    if reuse {
+        SYNTHESIZER.with(|slot| *slot.borrow_mut() = Some(synthesizer));
+    } else {
+        drop(synthesizer);
+    }
     if sample_rate == 0 || samples.is_empty() {
         bail!("the system voice produced no audio for this text");
     }
@@ -281,6 +343,7 @@ impl Engine for AvEngine {
             None,
             req.pitch,
             req.volume,
+            true,
         )
         .map(|r| r.audio)
     }
@@ -316,17 +379,23 @@ pub fn probe() {
     let short = "Short one.";
     let long = "Nobody knows why, although several theories have been put forward over the years, none of them entirely convincing.";
 
-    let cold = render(short, None, 1.0, None, 1.0, 1.0);
+    let cold = render(short, None, 1.0, None, 1.0, 1.0, false);
     line("cold, short", &cold);
     if cold.is_err() {
         println!("AVPROBE conclusion: no audio even with the main run loop serviced");
         return;
     }
-    line("warm, short", &render(short, None, 1.0, None, 1.0, 1.0));
-    line("warm, long", &render(long, None, 1.0, None, 1.0, 1.0));
+    line(
+        "warm, short",
+        &render(short, None, 1.0, None, 1.0, 1.0, false),
+    );
+    line(
+        "warm, long",
+        &render(long, None, 1.0, None, 1.0, 1.0, false),
+    );
     line(
         "warm, short again",
-        &render(short, None, 1.0, None, 1.0, 1.0),
+        &render(short, None, 1.0, None, 1.0, 1.0, false),
     );
     line(
         "named voice (Samantha), short",
@@ -337,6 +406,7 @@ pub fn probe() {
             None,
             1.0,
             1.0,
+            false,
         ),
     );
     line(
@@ -348,14 +418,41 @@ pub fn probe() {
             None,
             1.0,
             1.0,
+            false,
         ),
     );
+
+    // The same again on one synthesizer kept between calls.
+    for label in ["reused 1", "reused 2", "reused 3", "reused 4"] {
+        line(
+            &format!("{label}, short"),
+            &render(short, None, 1.0, None, 1.0, 1.0, true),
+        );
+    }
+    line(
+        "reused, long",
+        &render(long, None, 1.0, None, 1.0, 1.0, true),
+    );
+    line(
+        "reused, by voice name (Daniel)",
+        &render(short, Some("Daniel"), 1.0, None, 1.0, 1.0, true),
+    );
+    // The calibrated scale: these should come out near 1/1.5, 1/2.5, 2x.
+    let normal = render(long, None, 1.0, None, 1.0, 1.0, true).map(|r| r.audio.duration_secs());
+    for speed in [0.5f32, 1.5, 2.5, 3.5] {
+        if let (Ok(normal), Ok(r)) = (&normal, render(long, None, speed, None, 1.0, 1.0, true)) {
+            println!(
+                "AVPROBE speed {speed}x: measured {:.2}x",
+                normal / r.audio.duration_secs()
+            );
+        }
+    }
 
     // What the 0..1 rate scale means, measured as playback duration.
     for raw in [
         0.1f32, 0.2, 0.3, 0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.9, 1.0,
     ] {
-        match render(long, None, 1.0, Some(raw), 1.0, 1.0) {
+        match render(long, None, 1.0, Some(raw), 1.0, 1.0, false) {
             Ok(r) => println!(
                 "AVPROBE rate {raw:.2}: audio={:.3}s synthesis={:?}",
                 r.audio.duration_secs(),
@@ -369,7 +466,7 @@ pub fn probe() {
     let started = Instant::now();
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..3)
-            .map(|_| scope.spawn(|| render(long, None, 1.0, None, 1.0, 1.0).is_ok()))
+            .map(|_| scope.spawn(|| render(long, None, 1.0, None, 1.0, 1.0, false).is_ok()))
             .collect();
         let ok: Vec<bool> = handles
             .into_iter()
@@ -377,4 +474,25 @@ pub fn probe() {
             .collect();
         println!("AVPROBE three at once: {:?} ok={ok:?}", started.elapsed());
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_scale_is_monotonic_and_hits_the_measured_points() {
+        assert_eq!(utterance_rate(1.0), 0.5);
+        assert!((utterance_rate(2.108) - 0.70).abs() < 1e-4);
+        assert!((utterance_rate(1.45) - 0.576).abs() < 0.01);
+        assert_eq!(utterance_rate(10.0), 1.0);
+        assert!(utterance_rate(0.5) < 0.1 && utterance_rate(0.5) >= 0.0);
+        let mut last = -1.0;
+        for step in 0..=70 {
+            let rate = utterance_rate(0.5 + step as f32 * 0.05);
+            assert!(rate >= last, "not monotonic at step {step}");
+            last = rate;
+        }
+        assert_eq!(utterance_rate(f32::NAN), 0.5);
+    }
 }
