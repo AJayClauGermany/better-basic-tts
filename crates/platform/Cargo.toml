@@ -1,0 +1,35 @@
+[package]
+name = "bbtts-platform"
+description = "OS integration for Better Basic TTS: global shortcuts, reading the current selection, single-instance IPC."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+global-hotkey = "0.10"
+interprocess = "2.4"
+log = "0.4"
+raw-window-handle = "0.6"
+
+[target.'cfg(unix)'.dependencies]
+dirs = "6"
+
+[dev-dependencies]
+flume = "0.12"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
+which = "8"
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+arboard = { version = "3.7", default-features = false }
+enigo = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+active-win-pos-rs = "0.11"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+objc2 = "0.6"
