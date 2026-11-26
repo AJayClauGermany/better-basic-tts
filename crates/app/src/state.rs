@@ -11,7 +11,7 @@ use bbtts_core::player::PlayerConfig;
 use bbtts_core::{EngineRegistry, Player, PlayerSnapshot, Settings, Status};
 use bbtts_platform::hotkeys::{Action, Hotkeys};
 use bbtts_platform::ipc::Request;
-use bbtts_platform::selection::{self, Captured};
+use bbtts_platform::selection::{self, Capture, Captured, CopyRequest};
 use gpui_kit::{App, AsyncApp, Global};
 use std::path::PathBuf;
 
@@ -21,6 +21,9 @@ pub enum Event {
     Ipc(Request),
     /// A background capture of the selection / clipboard finished.
     Captured(Result<Captured, String>),
+    /// The selection can only be read by simulating a copy, which has to be
+    /// triggered from the UI thread.
+    NeedsCopy(CopyRequest),
     /// The voices of an engine were listed (engine id, voices).
     Voices(String, Vec<Voice>),
 }
@@ -227,6 +230,14 @@ fn handle_event(event: Event, cx: &mut App) {
                 tts.voices = voices;
             }
         }
+        Event::NeedsCopy(request) => {
+            let tts = cx.global_mut::<Tts>();
+            match request.press() {
+                // Waiting for the clipboard happens off the UI thread.
+                Ok(in_flight) => capture(tts, move || in_flight.finish()),
+                Err(e) => tts.notice = Some(format!("{e:#}")),
+            }
+        }
         Event::Captured(result) => match result {
             Ok(captured) => {
                 let title = captured.source.unwrap_or_else(|| "Selection".to_string());
@@ -251,7 +262,16 @@ pub fn perform(action: Action, cx: &mut App) {
             if snapshot.is_active() {
                 tts.player.stop();
             } else {
-                capture(tts, selection::capture_selection);
+                tts.notice = None;
+                let events = tts.events.clone();
+                std::thread::spawn(move || {
+                    let event = match selection::capture_selection() {
+                        Ok(Capture::Done(captured)) => Event::Captured(Ok(captured)),
+                        Ok(Capture::NeedsCopy(request)) => Event::NeedsCopy(request),
+                        Err(e) => Event::Captured(Err(format!("{e:#}"))),
+                    };
+                    let _ = events.send(event);
+                });
             }
         }
         Action::SpeakClipboard => capture(tts, || {

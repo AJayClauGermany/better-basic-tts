@@ -9,8 +9,14 @@
 //!
 //! The simulated copy saves and restores the textual clipboard content.
 //!
-//! All functions here block for up to a few hundred milliseconds; call them
-//! from a background thread.
+//! Capturing is split in up to three steps so that nothing slow runs on the
+//! UI thread and nothing that must run on the main thread runs elsewhere:
+//!
+//! 1. [`capture_selection`] — any thread; may block briefly. Either yields
+//!    the text or says that a copy has to be simulated.
+//! 2. [`CopyRequest::press`] — **main thread** (macOS resolves key codes
+//!    through an API that insists on it); returns quickly.
+//! 3. [`CopyInFlight::finish`] — any thread; waits for the clipboard.
 
 use anyhow::{anyhow, Result};
 
@@ -21,14 +27,65 @@ pub struct Captured {
     pub source: Option<String>,
 }
 
-/// The text currently selected in the frontmost application.
-pub fn capture_selection() -> Result<Captured> {
-    let source = frontmost_app();
-    let text = platform::selected_text()?;
+/// Outcome of the first capture step.
+#[derive(Debug)]
+pub enum Capture {
+    Done(Captured),
+    /// The selection can only be obtained by simulating the copy shortcut.
+    NeedsCopy(CopyRequest),
+}
+
+/// A pending "press copy in the frontmost application".
+#[derive(Debug)]
+pub struct CopyRequest {
+    source: Option<String>,
+}
+
+/// A copy that has been triggered; the clipboard has not been read yet.
+#[derive(Debug)]
+pub struct CopyInFlight {
+    source: Option<String>,
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    saved: Option<String>,
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    marker: String,
+}
+
+fn non_empty(text: String, source: Option<String>) -> Result<Captured> {
     if text.trim().is_empty() {
         return Err(anyhow!("No text is selected."));
     }
     Ok(Captured { text, source })
+}
+
+/// Step 1: the text currently selected in the frontmost application, or a
+/// request to simulate a copy. Never simulates input itself.
+pub fn capture_selection() -> Result<Capture> {
+    let source = frontmost_app();
+    match platform::selected_text()? {
+        Some(text) => non_empty(text, source).map(Capture::Done),
+        None => Ok(Capture::NeedsCopy(CopyRequest { source })),
+    }
+}
+
+impl CopyRequest {
+    /// Step 2: press the copy shortcut. Call on the main thread.
+    pub fn press(self) -> Result<CopyInFlight> {
+        let (saved, marker) = platform::press_copy()?;
+        Ok(CopyInFlight {
+            source: self.source,
+            saved,
+            marker,
+        })
+    }
+}
+
+impl CopyInFlight {
+    /// Step 3: wait for the copied text and restore the clipboard.
+    pub fn finish(self) -> Result<Captured> {
+        let text = platform::finish_copy(self.saved, &self.marker)?;
+        non_empty(text, self.source)
+    }
 }
 
 /// The text on the clipboard.
@@ -95,18 +152,27 @@ mod platform {
         std::env::var_os("WAYLAND_DISPLAY").is_some()
     }
 
-    pub fn selected_text() -> Result<String> {
+    /// The primary selection always answers; a copy is never needed.
+    pub fn selected_text() -> Result<Option<String>> {
         match read(LinuxClipboardKind::Primary) {
-            Ok(text) if !text.is_empty() => Ok(text),
+            Ok(text) if !text.is_empty() => Ok(Some(text)),
             other => {
                 if wayland() {
                     if let Some(text) = wl_paste(true) {
-                        return Ok(text);
+                        return Ok(Some(text));
                     }
                 }
-                other
+                other.map(Some)
             }
         }
+    }
+
+    pub fn press_copy() -> Result<(Option<String>, String)> {
+        Err(anyhow!("simulated copy is not used on this platform"))
+    }
+
+    pub fn finish_copy(_saved: Option<String>, _marker: &str) -> Result<String> {
+        Err(anyhow!("simulated copy is not used on this platform"))
     }
 
     pub fn clipboard_text() -> Result<String> {
@@ -144,19 +210,20 @@ mod platform {
         }
     }
 
-    pub fn selected_text() -> Result<String> {
+    /// `Some(text)` if the selection could be read without side effects.
+    pub fn selected_text() -> Result<Option<String>> {
         #[cfg(target_os = "macos")]
         if let Some(text) = super::accessibility::selected_text() {
             if !text.trim().is_empty() {
-                return Ok(text);
+                return Ok(Some(text));
             }
         }
-        copy_selection()
+        Ok(None)
     }
 
-    /// Press the platform's copy shortcut in the frontmost application and
-    /// read what lands on the clipboard, then put the old text back.
-    fn copy_selection() -> Result<String> {
+    /// Remember the clipboard, mark it, and press the platform's copy
+    /// shortcut in the frontmost application.
+    pub fn press_copy() -> Result<(Option<String>, String)> {
         let mut clipboard = Clipboard::new().context("could not access the clipboard")?;
         let saved = clipboard.get_text().ok();
 
@@ -167,24 +234,33 @@ mod platform {
             .set_text(marker.clone())
             .context("could not prepare the clipboard")?;
 
-        let pressed = press_copy();
+        if let Err(e) = send_copy_keys() {
+            restore(&mut clipboard, saved);
+            return Err(e);
+        }
+        Ok((saved, marker))
+    }
 
+    /// Wait for the copy to land, then put the old clipboard text back.
+    pub fn finish_copy(saved: Option<String>, marker: &str) -> Result<String> {
+        let mut clipboard = Clipboard::new().context("could not access the clipboard")?;
         let mut copied = None;
-        if pressed.is_ok() {
-            let deadline = Instant::now() + Duration::from_millis(600);
-            while Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(20));
-                match clipboard.get_text() {
-                    Ok(text) if text != marker => {
-                        copied = Some(text);
-                        break;
-                    }
-                    _ => {}
+        let deadline = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            match clipboard.get_text() {
+                Ok(text) if text != marker => {
+                    copied = Some(text);
+                    break;
                 }
+                _ => {}
             }
         }
+        restore(&mut clipboard, saved);
+        Ok(copied.unwrap_or_default())
+    }
 
-        // Restore what was there before.
+    fn restore(clipboard: &mut Clipboard, saved: Option<String>) {
         match saved {
             Some(text) => {
                 let _ = clipboard.set_text(text);
@@ -193,12 +269,9 @@ mod platform {
                 let _ = clipboard.clear();
             }
         }
-
-        pressed?;
-        Ok(copied.unwrap_or_default())
     }
 
-    fn press_copy() -> Result<()> {
+    fn send_copy_keys() -> Result<()> {
         let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
             if cfg!(target_os = "macos") {
                 anyhow!(
