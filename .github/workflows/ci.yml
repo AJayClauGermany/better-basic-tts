@@ -54,12 +54,6 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      - name: Probe the native macOS speech API
-        if: runner.os == 'macOS'
-        continue-on-error: true
-        timeout-minutes: 6
-        run: cargo test -p bbtts-core av_probe -- --ignored --nocapture
-
       - name: Lint
         if: runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -90,6 +84,17 @@ jobs:
           ./target/release/better-basic-tts benchmark
           # Again at a speed-listener's rate.
           ./target/release/better-basic-tts --config fast.toml benchmark
+
+      - name: Probe the native macOS speech API
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          ./target/release/better-basic-tts probe-speech
+          echo 'engine = "av"' > av.toml
+          ./target/release/better-basic-tts --config av.toml benchmark
+          printf 'engine = "av"\nrate = 2.5\n' > av-fast.toml
+          ./target/release/better-basic-tts --config av-fast.toml benchmark
 
       - name: Bundle macOS app
         if: runner.os == 'macOS'

@@ -59,6 +59,9 @@ enum Command {
     Engines,
     /// Show how text would be split and spoken, without speaking it.
     Explain(TextSource),
+    /// Print how the native macOS speech API behaves (diagnostics).
+    #[command(hide = true)]
+    ProbeSpeech,
     /// Measure how fast the speech engine is compared to playback.
     ///
     /// If reading pauses between sentences, this tells whether the engine
@@ -147,6 +150,12 @@ fn load_settings(path: &std::path::Path) -> Settings {
     })
 }
 
+/// Run headless work so that every engine can function: on macOS the native
+/// voice needs the main thread to keep servicing its event loop.
+fn with_main_loop<R: Send>(work: impl FnOnce() -> R + Send) -> R {
+    bbtts_core::engine::run_with_main_loop(work)
+}
+
 fn dispatch(cli: Cli) -> Result<()> {
     let settings_path = cli.config.unwrap_or_else(Settings::default_path);
     let Some(command) = cli.command else {
@@ -192,10 +201,10 @@ fn dispatch(cli: Cli) -> Result<()> {
                 settings.rate = rate;
             }
             settings.normalize();
-            match args.output {
+            with_main_loop(move || match args.output {
                 Some(path) => headless::render_to_file(&settings, &text, &path),
                 None => headless::speak_and_wait(&settings, &text),
-            }
+            })
         }
         Command::SpeakSelection => starting(Request::SpeakSelection),
         Command::SpeakClipboard => starting(Request::SpeakClipboard),
@@ -211,9 +220,16 @@ fn dispatch(cli: Cli) -> Result<()> {
             if let Some(engine) = engine {
                 settings.engine = engine;
             }
-            headless::list_voices(&settings)
+            with_main_loop(move || headless::list_voices(&settings))
         }
-        Command::Engines => headless::list_engines(&load_settings(&settings_path)),
+        Command::Engines => {
+            let settings = load_settings(&settings_path);
+            with_main_loop(move || headless::list_engines(&settings))
+        }
+        Command::ProbeSpeech => {
+            with_main_loop(bbtts_core::engine::probe_native_speech);
+            Ok(())
+        }
         Command::Benchmark(source) => {
             let settings = load_settings(&settings_path);
             let text = if source.is_absent() {
@@ -221,7 +237,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 source.read()?
             };
-            headless::benchmark(&settings, &text)
+            with_main_loop(move || headless::benchmark(&settings, &text))
         }
         Command::Explain(source) => {
             let settings = load_settings(&settings_path);

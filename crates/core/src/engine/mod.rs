@@ -13,8 +13,8 @@
 //! | `espeak`  | any (Linux default) | `espeak-ng` if installed                   |
 //! | custom    | any             | any local command that produces a WAV file (Piper, KittenTTS, NeuTTS, ...) |
 
-#[cfg(all(test, target_os = "macos"))]
-mod av_probe;
+#[cfg(target_os = "macos")]
+pub mod av;
 mod command;
 mod espeak;
 mod say;
@@ -222,6 +222,38 @@ pub trait Engine: Send + Sync {
     }
 }
 
+/// Tell the engine layer that the main thread is running its event loop
+/// (the GUI does). Only matters on macOS, where the native speech API
+/// delivers audio through that loop.
+pub fn set_main_loop_serviced(serviced: bool) {
+    #[cfg(target_os = "macos")]
+    av::set_main_loop_serviced(serviced);
+    #[cfg(not(target_os = "macos"))]
+    let _ = serviced;
+}
+
+/// Run `work` so that engines needing the main event loop can function when
+/// no UI is running it: on macOS the work moves to another thread while the
+/// calling (main) thread services its run loop. Elsewhere it just runs.
+pub fn run_with_main_loop<R: Send>(work: impl FnOnce() -> R + Send) -> R {
+    #[cfg(target_os = "macos")]
+    {
+        av::run_with_main_loop(work)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        work()
+    }
+}
+
+/// Print how the native macOS speech API behaves on this machine.
+pub fn probe_native_speech() {
+    #[cfg(target_os = "macos")]
+    av::probe();
+    #[cfg(not(target_os = "macos"))]
+    println!("The native speech probe only exists on macOS.");
+}
+
 /// All engines available on this machine.
 #[derive(Clone, Default)]
 pub struct EngineRegistry {
@@ -235,6 +267,11 @@ impl EngineRegistry {
 
         #[cfg(target_os = "macos")]
         if let Some(e) = SayEngine::detect() {
+            engines.push(Arc::new(e));
+        }
+        // Experimental, so after `say`: it has to be chosen explicitly.
+        #[cfg(target_os = "macos")]
+        if let Some(e) = av::AvEngine::detect() {
             engines.push(Arc::new(e));
         }
         #[cfg(windows)]

@@ -35,8 +35,8 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 tempfile = "3"
 
-# The native macOS speech API, for now only probed by a test on Mac CI.
-[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The native macOS speech API (experimental engine).
+[target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
 objc2-avf-audio = "0.3"

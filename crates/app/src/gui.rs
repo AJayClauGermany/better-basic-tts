@@ -16,6 +16,9 @@ pub fn run(settings_path: PathBuf, initial: Option<Request>) -> Result<()> {
         .run(move |cx| {
             gpui_kit::init(cx);
             panel::bind_keys(cx);
+            // The toolkit runs the main event loop from here on, which the
+            // native macOS voice depends on.
+            bbtts_core::engine::set_main_loop_serviced(true);
             state::init(settings_path, cx);
 
             // Become the single instance and accept remote control.
