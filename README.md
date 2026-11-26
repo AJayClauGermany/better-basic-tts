@@ -25,9 +25,15 @@ Written in Rust with [GPUI](https://www.gpui.rs/) and [GPUI Kit](https://gpui-ki
 
 ## Status
 
-Early but working. Developed and exercised end to end on Linux (X11); the macOS and
-Windows code paths are compiled and smoke-tested by CI but have had far less hands-on
-use — see [Known limitations](#known-limitations).
+Early but working.
+
+| Platform | State |
+|----------|-------|
+| Linux (X11) | developed and exercised end to end: panel, mouse and keyboard, global shortcut, remote control, settings, eSpeak NG and KittenTTS voices |
+| macOS, Windows | built, unit-tested and smoke-tested in CI (including synthesising speech with the system voices to a file); the window, global shortcut and selection capture have **not yet been used by a person** |
+| Linux (Wayland) | should work with the CLI commands bound to keys; untested |
+
+See [Known limitations](#known-limitations).
 
 ## Using it
 
@@ -241,8 +247,10 @@ cargo test --workspace
 
 ## Known limitations
 
-- **macOS / Windows are lightly tested.** They compile and pass CI, but the simulated
+- **macOS / Windows are lightly tested.** They build and pass CI, but the simulated
   copy, the Accessibility lookup and the window behaviour need real-world use.
+- The panel is the application: closing it quits, and global shortcuts only work
+  while it is running (minimise it instead).
 - **Wayland:** no global shortcuts (use the CLI commands above) and no
   always-on-top (use the compositor's "keep above").
 - **macOS "keep on top"** changes apply at the next start.
