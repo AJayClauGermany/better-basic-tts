@@ -273,11 +273,19 @@ impl Player {
 // Synthesis jobs
 // ---------------------------------------------------------------------------
 
+/// One call to the engine: one sentence, or several consecutive ones that
+/// share voice and speed for engines that are cheaper per sentence that way.
 struct Job {
     generation: u64,
-    key: Key,
     engine: Arc<dyn Engine>,
-    request: SynthRequest,
+    /// Voice, rate, pitch and volume; the text is in `items`.
+    params: SynthRequest,
+    items: Vec<JobItem>,
+}
+
+struct JobItem {
+    key: Key,
+    text: String,
     pause_after_ms: u32,
 }
 
@@ -295,15 +303,16 @@ struct JobState {
 }
 
 impl JobQueue {
-    /// Replace the pending jobs. Jobs already running are left alone and not
-    /// queued a second time.
-    fn set(&self, jobs: Vec<Job>) {
+    /// Replace the pending jobs. `plan` is told which sentences are being
+    /// synthesised right now so it does not ask for them a second time.
+    fn plan(&self, plan: impl FnOnce(&HashSet<(u64, Key)>) -> Vec<Job>) {
         let mut state = self.state.lock().unwrap();
-        state.pending = jobs
-            .into_iter()
-            .filter(|j| !state.running.contains(&(j.generation, j.key)))
-            .collect();
+        state.pending = plan(&state.running).into();
         self.wake.notify_all();
+    }
+
+    fn clear(&self) {
+        self.state.lock().unwrap().pending.clear();
     }
 
     fn take(&self) -> Option<Job> {
@@ -313,7 +322,9 @@ impl JobQueue {
                 return None;
             }
             if let Some(job) = state.pending.pop_front() {
-                state.running.insert((job.generation, job.key));
+                for item in &job.items {
+                    state.running.insert((job.generation, item.key));
+                }
                 return Some(job);
             }
             state = self.wake.wait(state).unwrap();
@@ -336,28 +347,60 @@ impl JobQueue {
 
 fn synth_thread(jobs: Arc<JobQueue>, tx: flume::Sender<Msg>) {
     while let Some(job) = jobs.take() {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            job.engine.synthesize(&job.request)
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let [item] = job.items.as_slice() {
+                job.engine
+                    .synthesize(&SynthRequest {
+                        text: item.text.clone(),
+                        ..job.params.clone()
+                    })
+                    .map(|audio| vec![audio])
+            } else {
+                let texts: Vec<String> = job.items.iter().map(|i| i.text.clone()).collect();
+                job.engine.synthesize_batch(&texts, &job.params)
+            }
         }))
         .unwrap_or_else(|_| Err(anyhow::anyhow!("the speech engine crashed")))
-        .map(|mut audio| {
-            audio.trim_silence(25);
-            audio.append_silence(job.pause_after_ms);
-            Arc::new(audio)
-        })
-        .map_err(|e| format!("{e:#}"));
-        // The job stays marked as running until the control thread has
-        // stored the result; otherwise it could be queued a second time in
-        // the window between "finished" and "cached".
-        if tx
-            .send(Msg::Synthesized {
-                generation: job.generation,
-                key: job.key,
-                result,
-            })
-            .is_err()
-        {
-            break;
+        .and_then(|audios| {
+            if audios.len() == job.items.len() {
+                Ok(audios)
+            } else {
+                Err(anyhow::anyhow!(
+                    "the speech engine returned {} pieces of audio for {} sentences",
+                    audios.len(),
+                    job.items.len()
+                ))
+            }
+        });
+        let results: Vec<Result<Arc<Audio>, String>> = match outcome {
+            Ok(audios) => audios
+                .into_iter()
+                .zip(&job.items)
+                .map(|(mut audio, item)| {
+                    audio.trim_silence(25);
+                    audio.append_silence(item.pause_after_ms);
+                    Ok(Arc::new(audio))
+                })
+                .collect(),
+            Err(e) => {
+                let message = format!("{e:#}");
+                job.items.iter().map(|_| Err(message.clone())).collect()
+            }
+        };
+        // The sentences stay marked as running until the control thread has
+        // stored the results; otherwise they could be queued a second time
+        // in the window between "finished" and "cached".
+        for (item, result) in job.items.iter().zip(results) {
+            if tx
+                .send(Msg::Synthesized {
+                    generation: job.generation,
+                    key: item.key,
+                    result,
+                })
+                .is_err()
+            {
+                return;
+            }
         }
     }
 }
@@ -605,7 +648,7 @@ impl Worker {
         self.queued = None;
         self.resume_fraction = 0.0;
         self.out.stop();
-        self.jobs.set(Vec::new());
+        self.jobs.clear();
     }
 
     /// Play sentence `self.idx` at the current rate, from `fraction` of its
@@ -660,10 +703,19 @@ impl Worker {
     /// Queue synthesis for the current sentence and the next few.
     fn schedule(&mut self) {
         let rk = rate_key(self.rate);
-        // Forget audio we will not need again soon.
         let idx = self.idx;
+        // Engines that take several sentences per call are fed in batches,
+        // which needs a longer view ahead to fill them.
+        let batch_size = self
+            .cfg
+            .engine
+            .as_ref()
+            .map(|e| e.batch_size().max(1))
+            .unwrap_or(1);
+        let lookahead = PREFETCH.max(2 * batch_size + 1);
+        // Forget audio we will not need again soon.
         self.cache
-            .retain(|&(i, r), _| r == rk && i + 2 >= idx && i <= idx + PREFETCH + 1);
+            .retain(|&(i, r), _| r == rk && i + 2 >= idx && i <= idx + lookahead + 1);
 
         let Some(engine) = self.cfg.engine.clone() else {
             if self.active {
@@ -672,9 +724,10 @@ impl Worker {
             }
             return;
         };
-        let mut jobs = Vec::new();
+        // What we would like to have, in reading order.
+        let mut wanted: Vec<(SynthRequest, JobItem)> = Vec::new();
         if self.active {
-            for i in idx..(idx + 1 + PREFETCH).min(self.playlist.len()) {
+            for i in idx..(idx + 1 + lookahead).min(self.playlist.len()) {
                 let key = (i, rk);
                 if self.cache.contains_key(&key) {
                     continue;
@@ -687,30 +740,77 @@ impl Worker {
                 } else {
                     utterance.spoken.clone()
                 };
-                jobs.push(Job {
-                    generation: self.generation,
-                    key,
-                    engine: engine.clone(),
-                    request: SynthRequest {
-                        text,
-                        voice: if style.voice.is_empty() {
-                            self.cfg.voice.clone()
-                        } else {
-                            Some(style.voice.clone())
-                        },
-                        rate: self.rate * style.rate,
-                        pitch: style.pitch,
-                        volume: (self.cfg.volume * style.volume).clamp(0.0, 1.0),
-                    },
-                    pause_after_ms: if utterance.ends_block {
-                        style.pause_after_ms
+                let params = SynthRequest {
+                    text: String::new(),
+                    voice: if style.voice.is_empty() {
+                        self.cfg.voice.clone()
                     } else {
-                        self.cfg.sentence_pause_ms
+                        Some(style.voice.clone())
                     },
-                });
+                    rate: self.rate * style.rate,
+                    pitch: style.pitch,
+                    volume: (self.cfg.volume * style.volume).clamp(0.0, 1.0),
+                };
+                let pause_after_ms = if utterance.ends_block {
+                    style.pause_after_ms
+                } else {
+                    self.cfg.sentence_pause_ms
+                };
+                wanted.push((
+                    params,
+                    JobItem {
+                        key,
+                        text,
+                        pause_after_ms,
+                    },
+                ));
             }
         }
-        self.jobs.set(jobs);
+
+        let generation = self.generation;
+        let window_end = (idx + 1 + lookahead).min(self.playlist.len());
+        let more_text_follows = window_end < self.playlist.len();
+        self.jobs.plan(|running| {
+            let mut jobs: Vec<Job> = Vec::new();
+            for (params, item) in wanted {
+                if running.contains(&(generation, item.key)) {
+                    continue;
+                }
+                // The sentence that is due now and the one after it go alone,
+                // so that reading starts (and continues) as soon as possible;
+                // what follows may share calls.
+                let urgent = item.key.0 <= idx + 1;
+                let joins_previous = jobs.last().is_some_and(|job| {
+                    let last = job.items.last().expect("jobs are never empty");
+                    !urgent
+                        && last.key.0 > idx + 1
+                        && last.key.0 + 1 == item.key.0
+                        && job.items.len() < batch_size
+                        && job.params == params
+                });
+                if joins_previous {
+                    jobs.last_mut().expect("checked above").items.push(item);
+                } else {
+                    jobs.push(Job {
+                        generation,
+                        engine: engine.clone(),
+                        params,
+                        items: vec![item],
+                    });
+                }
+            }
+            // A batch at the far edge of the window that is not full yet
+            // will fill up as reading moves on: wait for it rather than
+            // spend a whole call on a sentence or two.
+            if let Some(job) = jobs.last() {
+                let last = job.items.last().expect("jobs are never empty").key.0;
+                let can_grow = more_text_follows && last + 1 == window_end;
+                if last > idx + 1 && job.items.len() < batch_size && can_grow {
+                    jobs.pop();
+                }
+            }
+            jobs
+        });
     }
 
     fn synthesized(&mut self, generation: u64, key: Key, result: Result<Arc<Audio>, String>) {

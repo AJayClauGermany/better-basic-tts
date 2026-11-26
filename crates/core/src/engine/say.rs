@@ -6,20 +6,35 @@
 
 use super::{run_command, temp_path, wav, Audio, Engine, SynthRequest, Voice};
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
 
 /// Words per minute at rate 1.0. `say` voices default to roughly this.
 const BASE_WPM: f32 = 180.0;
 
+/// Sentences rendered per `say` call when preparing ahead.
+const BATCH_SIZE: usize = 5;
+/// Silence requested between the sentences of a batch, in milliseconds.
+/// Far longer than any pause inside a sentence, so the cuts are unambiguous.
+const SEPARATOR_MS: u32 = 3000;
+/// Stop batching for a voice after this many failed attempts in a row.
+const MAX_BATCH_FAILURES: u32 = 2;
+
 pub struct SayEngine {
     program: PathBuf,
+    /// Per voice: how often in a row a batch could not be taken apart.
+    batch_failures: Mutex<HashMap<String, u32>>,
 }
 
 impl SayEngine {
     pub fn detect() -> Option<Self> {
         let program = PathBuf::from("/usr/bin/say");
-        program.exists().then_some(Self { program })
+        program.exists().then(|| Self {
+            program,
+            batch_failures: Mutex::default(),
+        })
     }
 }
 
@@ -82,21 +97,47 @@ impl Engine for SayEngine {
     }
 
     fn synthesize(&self, req: &SynthRequest) -> Result<Audio> {
+        self.render(&neutralize_embedded_commands(&req.text), req)
+    }
+
+    fn batch_size(&self) -> usize {
+        BATCH_SIZE
+    }
+
+    fn synthesize_batch(&self, texts: &[String], params: &SynthRequest) -> Result<Vec<Audio>> {
+        if let Some(pieces) = self.try_batch(texts, params)? {
+            return Ok(pieces);
+        }
+        texts
+            .iter()
+            .map(|text| {
+                self.synthesize(&SynthRequest {
+                    text: text.clone(),
+                    ..params.clone()
+                })
+            })
+            .collect()
+    }
+}
+
+impl SayEngine {
+    /// Run `say` on text that is already safe (embedded commands defused,
+    /// except the ones we add ourselves).
+    fn render(&self, safe_text: &str, req: &SynthRequest) -> Result<Audio> {
         let input = temp_path("txt");
         let output = temp_path("wav");
-        let mut text = neutralize_embedded_commands(&req.text);
         // Our own, trusted, embedded commands for what `say` has no flag for.
-        let mut prefix = String::new();
+        let mut text = String::new();
         if (req.volume - 1.0).abs() > 0.01 {
-            prefix.push_str(&format!("[[volm {:.2}]] ", req.volume.clamp(0.0, 1.0)));
+            text.push_str(&format!("[[volm {:.2}]] ", req.volume.clamp(0.0, 1.0)));
         }
         if (req.pitch - 1.0).abs() > 0.01 {
             // Relative baseline pitch in semitone-ish steps.
             let delta = (12.0 * req.pitch.max(0.1).log2()).round() as i32;
             let sign = if delta >= 0 { "+" } else { "-" };
-            prefix.push_str(&format!("[[pbas {sign}{}]] ", delta.abs()));
+            text.push_str(&format!("[[pbas {sign}{}]] ", delta.abs()));
         }
-        text.insert_str(0, &prefix);
+        text.push_str(safe_text);
         std::fs::write(&input, text.as_bytes()).context("could not write temp text file")?;
 
         let wpm = (BASE_WPM * req.rate).round().clamp(60.0, 720.0) as i32;
@@ -124,6 +165,60 @@ impl Engine for SayEngine {
         let _ = std::fs::remove_file(&output);
         result
     }
+
+    /// Render several sentences with one `say` call and cut the result apart.
+    ///
+    /// Starting `say` costs about a second no matter how short the text is,
+    /// which is more than a short sentence takes to play at a brisk speed.
+    /// So the sentences are sent together, separated by a long silence that
+    /// we ask for with an embedded command, and the audio is split at those
+    /// silences afterwards.
+    ///
+    /// Returns `Ok(None)` when that did not yield exactly one piece per
+    /// sentence (a voice may ignore the silence command); the caller then
+    /// renders the sentences one by one. A voice that keeps failing is no
+    /// longer tried.
+    fn try_batch(&self, texts: &[String], params: &SynthRequest) -> Result<Option<Vec<Audio>>> {
+        if texts.len() < 2 {
+            return Ok(None);
+        }
+        let voice = params.voice.clone().unwrap_or_default();
+        if self
+            .batch_failures
+            .lock()
+            .unwrap()
+            .get(&voice)
+            .copied()
+            .unwrap_or(0)
+            >= MAX_BATCH_FAILURES
+        {
+            return Ok(None);
+        }
+        let separator = format!(" [[slnc {SEPARATOR_MS}]] ");
+        let joined = texts
+            .iter()
+            .map(|t| neutralize_embedded_commands(t))
+            .collect::<Vec<_>>()
+            .join(&separator);
+        let audio = self.render(&joined, params)?;
+        let pieces = audio.split_at_pauses(texts.len());
+        let mut failures = self.batch_failures.lock().unwrap();
+        match pieces {
+            Some(pieces) => {
+                failures.remove(&voice);
+                Ok(Some(pieces))
+            }
+            None => {
+                let count = failures.entry(voice).or_insert(0);
+                *count += 1;
+                log::info!(
+                    "could not take {} sentences apart after rendering them together (attempt {count})",
+                    texts.len()
+                );
+                Ok(None)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +242,56 @@ mod tests {
             neutralize_embedded_commands("a [[rate 900]] b [[[x]]]"),
             "a [ [rate 900] ] b [ [ [x] ] ]"
         );
+    }
+}
+
+/// These run on a real Mac only (CI has one): they are the proof that the
+/// system voice honours the silence command and that batching is used.
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn batches_are_taken_apart_per_sentence() {
+        let engine = SayEngine::detect().expect("/usr/bin/say");
+        let texts: Vec<String> = [
+            "The quick brown fox jumps over the lazy dog.",
+            "Short one.",
+            "Wait, this one has a comma, and a second clause; even a semicolon.",
+            "Done.",
+        ]
+        .map(String::from)
+        .to_vec();
+        for rate in [1.0, 2.5] {
+            let mut params = SynthRequest::new("");
+            params.rate = rate;
+            let pieces = engine
+                .try_batch(&texts, &params)
+                .unwrap()
+                .unwrap_or_else(|| panic!("batch at rate {rate} could not be taken apart"));
+            assert_eq!(pieces.len(), texts.len());
+            let durations: Vec<f64> = pieces.iter().map(|p| p.duration_secs()).collect();
+            eprintln!("rate {rate}: sentence durations {durations:?}");
+            for d in &durations {
+                assert!(*d > 0.1, "a piece is empty: {durations:?}");
+            }
+            // The long sentences are longer than the short ones.
+            assert!(durations[0] > durations[1] && durations[2] > durations[3]);
+            // And each piece matches the sentence rendered on its own.
+            for (text, piece) in texts.iter().zip(&pieces) {
+                let mut alone = engine
+                    .synthesize(&SynthRequest {
+                        text: text.clone(),
+                        ..params.clone()
+                    })
+                    .unwrap();
+                alone.trim_silence(0);
+                let (a, b) = (alone.duration_secs(), piece.duration_secs());
+                assert!(
+                    (a - b).abs() < 0.35 + a * 0.2,
+                    "{text:?}: alone {a:.2}s, in batch {b:.2}s"
+                );
+            }
+        }
     }
 }

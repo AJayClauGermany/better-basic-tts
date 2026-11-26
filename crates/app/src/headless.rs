@@ -251,7 +251,7 @@ pub fn benchmark(settings: &Settings, text: &str) -> Result<()> {
     print_all(&out);
 
     // One at a time. The first call may include loading the voice.
-    let (mut synth_total, mut audio_total, mut slowest) = (0.0f64, 0.0f64, f64::MAX);
+    let (mut synth_total, mut audio_total) = (0.0f64, 0.0f64);
     for (i, u) in utterances.iter().enumerate() {
         let started = Instant::now();
         let audio = engine
@@ -262,10 +262,6 @@ pub fn benchmark(settings: &Settings, text: &str) -> Result<()> {
         let ratio = playback / synth.max(1e-6);
         synth_total += synth;
         audio_total += playback;
-        // The first sentence is start-up, not steady state.
-        if i > 0 {
-            slowest = slowest.min(ratio);
-        }
         let preview: String = u.display.chars().take(40).collect();
         print_all(&format!(
             "{:>3}  {:>7.0}ms  {:>6.0}ms  {:>6.1}x  {}\n",
@@ -277,15 +273,18 @@ pub fn benchmark(settings: &Settings, text: &str) -> Result<()> {
         ));
     }
 
-    // Three at a time, the way the player prepares sentences ahead.
+    // The way the player prepares ahead: three calls at once, and several
+    // sentences per call for engines that are cheaper that way.
+    let batch_size = engine.batch_size().max(1);
     let started = Instant::now();
-    let queue = std::sync::Mutex::new(utterances.iter());
+    let queue = std::sync::Mutex::new(utterances.chunks(batch_size));
     std::thread::scope(|scope| {
         for _ in 0..3 {
             scope.spawn(|| loop {
                 let next = queue.lock().unwrap().next();
-                let Some(u) = next else { break };
-                let _ = engine.synthesize(&request(u));
+                let Some(chunk) = next else { break };
+                let texts: Vec<String> = chunk.iter().map(|u| u.spoken.clone()).collect();
+                let _ = engine.synthesize_batch(&texts, &request(&chunk[0]));
             });
         }
     });
@@ -297,14 +296,16 @@ pub fn benchmark(settings: &Settings, text: &str) -> Result<()> {
         out,
         "\nOne sentence at a time: {sequential:.1}x faster than playback."
     );
-    let _ = writeln!(
-        out,
-        "Three at a time:        {parallel:.1}x faster than playback."
-    );
-    let verdict = if parallel >= 2.0 && (slowest >= 1.0 || utterances.len() < 2) {
+    let how = if batch_size > 1 {
+        format!("Prepared ahead ({batch_size} per call, 3 calls at once):")
+    } else {
+        "Prepared ahead (3 at once):".to_string()
+    };
+    let _ = writeln!(out, "{how} {parallel:.1}x faster than playback.");
+    let verdict = if parallel >= 3.0 {
         "The engine keeps up comfortably; reading should not pause between sentences."
-    } else if parallel >= 1.0 {
-        "The engine barely keeps up at this speed; short sentences in a row may cause pauses."
+    } else if parallel >= 1.2 {
+        "The engine only just keeps up at this speed; an occasional pause is possible."
     } else {
         "The engine is slower than playback at this speed; reading will pause between sentences."
     };

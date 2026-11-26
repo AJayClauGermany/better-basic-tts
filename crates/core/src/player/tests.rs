@@ -604,3 +604,115 @@ fn a_voice_with_another_sample_rate_starts_its_own_stream() {
     wait_for(&p, "all played", |_| plays.load(Ordering::SeqCst) == 2);
     assert_eq!(handovers.load(Ordering::SeqCst), 1);
 }
+
+/// An engine that, like macOS `say`, is much cheaper per sentence when it is
+/// given several at once.
+struct BatchEngine {
+    /// Sentence texts per call, in call order.
+    calls: Mutex<Vec<Vec<String>>>,
+}
+
+impl Engine for BatchEngine {
+    fn id(&self) -> &str {
+        "batch"
+    }
+    fn name(&self) -> &str {
+        "Batch"
+    }
+    fn voices(&self) -> anyhow::Result<Vec<Voice>> {
+        Ok(vec![])
+    }
+    fn synthesize(&self, req: &SynthRequest) -> anyhow::Result<Audio> {
+        self.calls.lock().unwrap().push(vec![req.text.clone()]);
+        std::thread::sleep(Duration::from_millis(40));
+        Ok(Audio {
+            sample_rate: 1000,
+            samples: vec![0.5; 1000],
+        })
+    }
+    fn batch_size(&self) -> usize {
+        4
+    }
+    fn synthesize_batch(&self, texts: &[String], _: &SynthRequest) -> anyhow::Result<Vec<Audio>> {
+        self.calls.lock().unwrap().push(texts.to_vec());
+        std::thread::sleep(Duration::from_millis(40));
+        Ok(texts
+            .iter()
+            .map(|_| Audio {
+                sample_rate: 1000,
+                samples: vec![0.5; 1000],
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn look_ahead_is_batched_for_engines_that_want_it() {
+    let engine = Arc::new(BatchEngine {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut cfg = config(FakeEngine::new());
+    cfg.engine = Some(engine.clone());
+    let p = Player::new(|| Box::new(SilentOutput::with_speed(5.0)), cfg, 1.0, || {});
+    // All paragraphs, so the voice parameters never force a batch to end.
+    let mut text = utterances(14);
+    text[0].role = Role::Paragraph;
+    p.speak(text, "");
+    let mut seen = Vec::new();
+    let start = Instant::now();
+    loop {
+        let snap = p.snapshot();
+        if snap.status == Status::Idle && !seen.is_empty() {
+            break;
+        }
+        if snap.status == Status::Playing && seen.last() != Some(&snap.index) {
+            seen.push(snap.index);
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "stuck: {snap:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(seen, (0..14).collect::<Vec<_>>());
+
+    let calls = engine.calls.lock().unwrap();
+    // The first two sentences are fetched on their own for a quick start.
+    assert!(calls.contains(&vec!["sentence 0".to_string()]));
+    assert!(calls.contains(&vec!["sentence 1".to_string()]));
+    // The rest arrives in full batches (the tail of the text may be shorter).
+    let sizes: Vec<usize> = calls.iter().map(|c| c.len()).collect();
+    assert!(sizes.iter().filter(|&&n| n == 4).count() >= 2, "{sizes:?}");
+    assert!(calls.len() <= 7, "too many engine calls: {sizes:?}");
+    // Every sentence is synthesised exactly once.
+    let mut all: Vec<&String> = calls.iter().flatten().collect();
+    all.sort();
+    let before = all.len();
+    all.dedup();
+    assert_eq!((before, all.len()), (14, 14), "{sizes:?}");
+}
+
+#[test]
+fn a_batch_stops_where_the_voice_changes() {
+    let engine = Arc::new(BatchEngine {
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut cfg = config(FakeEngine::new());
+    cfg.engine = Some(engine.clone());
+    cfg.roles.quote.voice = "other".into();
+    let p = Player::new(|| Box::new(SilentOutput::with_speed(20.0)), cfg, 1.0, || {});
+    let mut text = utterances(8);
+    for u in &mut text {
+        u.role = Role::Paragraph;
+    }
+    text[4].role = Role::Quote;
+    p.speak(text, "");
+    wait_for(&p, "done", |s| {
+        s.status == Status::Idle && s.total == 8 && s.index == 0
+    });
+    let calls = engine.calls.lock().unwrap();
+    for call in calls.iter() {
+        let has_quote = call.iter().any(|t| t == "sentence 4");
+        assert!(
+            !has_quote || call.len() == 1,
+            "the quote must not share a call: {call:?}"
+        );
+    }
+}

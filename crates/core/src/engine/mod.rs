@@ -74,6 +74,69 @@ impl Audio {
         }
     }
 
+    /// Cut the audio into `parts` pieces at the `parts - 1` longest pauses.
+    ///
+    /// Used to take apart several sentences rendered in one go with a long
+    /// silence between them. Returns `None` unless the cuts are unambiguous:
+    /// each must be a real pause, and clearly longer than any other pause in
+    /// the audio (such as one after a comma).
+    pub fn split_at_pauses(&self, parts: usize) -> Option<Vec<Audio>> {
+        const THRESHOLD: f32 = 0.004;
+        if parts == 0 || self.sample_rate == 0 {
+            return None;
+        }
+        if parts == 1 {
+            return Some(vec![self.clone()]);
+        }
+        let first = self.samples.iter().position(|s| s.abs() > THRESHOLD)?;
+        let last = self.samples.iter().rposition(|s| s.abs() > THRESHOLD)?;
+
+        // Silent runs strictly inside the spoken part: (start, length).
+        let min_run = self.sample_rate as usize / 10;
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut run_start = None;
+        for (i, sample) in self.samples.iter().enumerate().take(last + 1).skip(first) {
+            let silent = sample.abs() <= THRESHOLD;
+            match (silent, run_start) {
+                (true, None) => run_start = Some(i),
+                (false, Some(start)) => {
+                    if i - start >= min_run {
+                        runs.push((start, i - start));
+                    }
+                    run_start = None;
+                }
+                _ => {}
+            }
+        }
+        if runs.len() < parts - 1 {
+            return None;
+        }
+        runs.sort_by_key(|&(_, len)| std::cmp::Reverse(len));
+        let shortest_cut = runs[parts - 2].1;
+        let longest_other = runs.get(parts - 1).map(|r| r.1).unwrap_or(0);
+        let min_cut = self.sample_rate as usize * 7 / 10;
+        if shortest_cut < min_cut || shortest_cut < longest_other * 2 {
+            return None;
+        }
+        let mut cuts: Vec<(usize, usize)> = runs[..parts - 1].to_vec();
+        cuts.sort_by_key(|&(start, _)| start);
+
+        let mut pieces = Vec::with_capacity(parts);
+        let mut begin = first;
+        for (start, len) in cuts {
+            pieces.push(Audio {
+                sample_rate: self.sample_rate,
+                samples: self.samples[begin..start].to_vec(),
+            });
+            begin = start + len;
+        }
+        pieces.push(Audio {
+            sample_rate: self.sample_rate,
+            samples: self.samples[begin..=last].to_vec(),
+        });
+        Some(pieces)
+    }
+
     pub fn append_silence(&mut self, millis: u32) {
         let n = (self.sample_rate as u64 * millis as u64 / 1000) as usize;
         self.samples.extend(std::iter::repeat_n(0.0, n));
@@ -132,6 +195,29 @@ pub trait Engine: Send + Sync {
     fn name(&self) -> &str;
     fn voices(&self) -> Result<Vec<Voice>>;
     fn synthesize(&self, req: &SynthRequest) -> Result<Audio>;
+
+    /// How many consecutive sentences the player may hand over in one call
+    /// to [`Engine::synthesize_batch`]. Engines with a high fixed cost per
+    /// call (macOS `say` needs about a second to get going, however short
+    /// the text) return more than 1.
+    fn batch_size(&self) -> usize {
+        1
+    }
+
+    /// Synthesize several texts that share voice, rate, pitch and volume
+    /// (taken from `params`; its `text` is ignored). Returns one [`Audio`]
+    /// per text, in order.
+    fn synthesize_batch(&self, texts: &[String], params: &SynthRequest) -> Result<Vec<Audio>> {
+        texts
+            .iter()
+            .map(|text| {
+                self.synthesize(&SynthRequest {
+                    text: text.clone(),
+                    ..params.clone()
+                })
+            })
+            .collect()
+    }
 }
 
 /// All engines available on this machine.
@@ -277,6 +363,74 @@ pub(crate) fn run_command(mut cmd: std::process::Command, stdin: Option<&[u8]>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `speech` seconds of signal with pauses of the given lengths between.
+    fn spoken(sample_rate: u32, parts: &[(f32, f32)]) -> Audio {
+        let mut samples = vec![0.0; sample_rate as usize / 5];
+        for &(speech, pause) in parts {
+            samples.extend(std::iter::repeat_n(
+                0.5,
+                (speech * sample_rate as f32) as usize,
+            ));
+            samples.extend(std::iter::repeat_n(
+                0.0,
+                (pause * sample_rate as f32) as usize,
+            ));
+        }
+        Audio {
+            sample_rate,
+            samples,
+        }
+    }
+
+    #[test]
+    fn splits_at_the_long_pauses_only() {
+        // Three sentences separated by 2 s; a 0.4 s comma pause inside the second.
+        let audio = spoken(1000, &[(1.0, 2.0), (0.5, 0.4), (0.7, 2.0), (1.5, 0.3)]);
+        let parts = audio.split_at_pauses(3).unwrap();
+        let lengths: Vec<usize> = parts.iter().map(|p| p.samples.len()).collect();
+        assert_eq!(lengths, vec![1000, 1600, 1500]);
+        // Asking for a split that is not there is refused, not guessed.
+        assert!(audio.split_at_pauses(5).is_none());
+        assert!(spoken(1000, &[(1.0, 0.5), (1.0, 0.45), (1.0, 0.0)])
+            .split_at_pauses(3)
+            .is_none());
+        assert!(Audio::silence(1000, 500).split_at_pauses(2).is_none());
+        assert_eq!(audio.split_at_pauses(1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn default_batch_is_one_call_per_text() {
+        struct Echo;
+        impl Engine for Echo {
+            fn id(&self) -> &str {
+                "echo"
+            }
+            fn name(&self) -> &str {
+                "Echo"
+            }
+            fn voices(&self) -> Result<Vec<Voice>> {
+                Ok(vec![])
+            }
+            fn synthesize(&self, req: &SynthRequest) -> Result<Audio> {
+                Ok(Audio {
+                    sample_rate: 1000,
+                    samples: vec![req.rate; req.text.len()],
+                })
+            }
+        }
+        let mut params = SynthRequest::new("");
+        params.rate = 2.0;
+        let out = Echo
+            .synthesize_batch(&["ab".to_string(), "abcd".to_string()], &params)
+            .unwrap();
+        assert_eq!(
+            out.iter().map(|a| a.samples.len()).collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+        assert_eq!(out[0].samples[0], 2.0);
+        assert_eq!(Echo.batch_size(), 1);
+    }
 
     #[test]
     fn trim_silence_keeps_margin() {

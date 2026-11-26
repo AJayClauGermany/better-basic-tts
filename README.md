@@ -213,9 +213,11 @@ raw text → sanitize → interpreter → [block: role + text] → sentences →
    text sent to an engine contains no `<` or `>` at all, so no engine can mistake it
    for SSML or HTML.
 4. **Role styles** — pick voice, rate, pitch, volume, announcement and pauses.
-5. **Engine** — one sentence in, PCM out. Up to six sentences are prepared ahead, and
-   each one is handed to the audio stream before the previous one ends, so sentences
-   follow each other without a seam.
+5. **Engine** — one sentence in, PCM out. Sentences are prepared ahead of the one being
+   read, and each is handed to the audio stream before the previous one ends, so they
+   follow each other without a seam. Engines with a high start-up cost per call (macOS
+   `say` needs about a second however short the text) get several sentences per call;
+   the audio is cut apart again at the silences inserted between them.
 6. **Player** — owns the transport.
 
 ## Building
