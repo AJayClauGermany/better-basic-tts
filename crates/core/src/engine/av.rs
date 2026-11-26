@@ -121,10 +121,36 @@ fn utterance_rate(multiplier: f32) -> f32 {
     (r0 + (m - m0) / (m1 - m0) * (r1 - r0)).clamp(0.0, 1.0)
 }
 
+/// Synthesizers kept per thread, at most this many (one per voice in use).
+const KEPT_SYNTHESIZERS: usize = 6;
+
 thread_local! {
-    /// One synthesizer per synthesis thread, kept between sentences.
-    static SYNTHESIZER: std::cell::RefCell<Option<Retained<AVSpeechSynthesizer>>> =
-        const { std::cell::RefCell::new(None) };
+    /// Warm synthesizers of this synthesis thread, by voice. A synthesizer
+    /// that has spoken with a voice answers in milliseconds; a new one, or
+    /// one switching voices, needs a few hundred. Keeping one per voice
+    /// makes reading with several voices (headings, quotes, ...) as smooth
+    /// as reading with one.
+    static SYNTHESIZERS: std::cell::RefCell<Vec<(String, Retained<AVSpeechSynthesizer>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn take_synthesizer(voice: &str) -> Option<Retained<AVSpeechSynthesizer>> {
+    SYNTHESIZERS.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        let index = kept.iter().position(|(v, _)| v == voice)?;
+        Some(kept.remove(index).1)
+    })
+}
+
+fn keep_synthesizer(voice: &str, synthesizer: Retained<AVSpeechSynthesizer>) {
+    SYNTHESIZERS.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        // Most recently used last; the oldest makes room.
+        if kept.len() >= KEPT_SYNTHESIZERS {
+            kept.remove(0);
+        }
+        kept.push((voice.to_string(), synthesizer));
+    });
 }
 
 /// Find a voice by its identifier or, failing that, by its name (so a voice
@@ -211,7 +237,7 @@ fn render(
     // is kept alive until we stop listening.
     let synthesizer: Retained<AVSpeechSynthesizer> = unsafe {
         let kept = if reuse {
-            SYNTHESIZER.with(|slot| slot.borrow_mut().take())
+            take_synthesizer(voice.unwrap_or_default())
         } else {
             None
         };
@@ -277,7 +303,7 @@ fn render(
     // A synthesizer that finished cleanly is kept for the next sentence; one
     // that timed out or failed was dropped above and is not reused.
     if reuse {
-        SYNTHESIZER.with(|slot| *slot.borrow_mut() = Some(synthesizer));
+        keep_synthesizer(voice.unwrap_or_default(), synthesizer);
     } else {
         drop(synthesizer);
     }
@@ -437,7 +463,16 @@ pub fn probe() {
         "reused, by voice name (Daniel)",
         &render(short, Some("Daniel"), 1.0, None, 1.0, 1.0, true),
     );
-    // The calibrated scale: these should come out near 1/1.5, 1/2.5, 2x.
+    // Alternating voices, as with a voice per role: each should stay warm.
+    for round in 1..=3 {
+        for name in ["Daniel", "Samantha"] {
+            line(
+                &format!("alternating round {round}, {name}"),
+                &render(short, Some(name), 1.0, None, 1.0, 1.0, true),
+            );
+        }
+    }
+    // The calibrated scale: these should come out at the speed asked for.
     let normal = render(long, None, 1.0, None, 1.0, 1.0, true).map(|r| r.audio.duration_secs());
     for speed in [0.5f32, 1.5, 2.5, 3.5] {
         if let (Ok(normal), Ok(r)) = (&normal, render(long, None, speed, None, 1.0, 1.0, true)) {

@@ -122,10 +122,16 @@ $ better-basic-tts explain 'Use Vec<String> when a < b. <script>alert(1)</script
 
 | id | Platform | Backend |
 |----|----------|---------|
-| `say` | macOS | the system voices, through `/usr/bin/say` |
+| `say` | macOS | the system voices, through `/usr/bin/say` (default for now) |
+| `av` | macOS | the same voices through the native speech API, in-process — **experimental**, far lower latency |
 | `winrt` | Windows 10+ | the system voices, `Windows.Media.SpeechSynthesis` |
 | `espeak` | any; default on Linux | [eSpeak NG](https://github.com/espeak-ng/espeak-ng) if installed |
 | *yours* | any | any local program that produces a WAV (see below) |
+
+On macOS, starting `say` costs about a second per call, so sentences are sent to it
+five at a time. The native engine (`engine = "av"`, or Settings → Voice → Engine) has
+no such cost — a sentence takes a few hundredths of a second once the voice is warm —
+and is meant to become the default once it has been used on real Macs.
 
 Linux has no bundled system voice, so install eSpeak NG as the baseline:
 
