@@ -370,8 +370,10 @@ struct Worker {
     active: bool,
     paused: bool,
     rate: f32,
-    /// The audio currently handed to the output.
-    loaded: Option<(Key, Arc<Audio>)>,
+    /// The audio currently handed to the output, with the generation it
+    /// was made for. After a speed or voice change this can be audio for the
+    /// *old* settings that keeps playing until the new audio is ready.
+    loaded: Option<(u64, Key, Arc<Audio>)>,
     /// Where in the current sentence to start once its audio is ready
     /// (0.0 ..= 1.0); non-zero after a speed or voice change mid-sentence.
     resume_fraction: f64,
@@ -460,7 +462,7 @@ impl Worker {
                 if self.active {
                     if self.idx + 1 < self.playlist.len() {
                         self.idx += 1;
-                        self.start_current(0.0);
+                        self.start_current(0.0, true);
                     } else {
                         self.halt();
                         self.idx = 0;
@@ -472,12 +474,12 @@ impl Worker {
                     let heard = self
                         .loaded
                         .as_ref()
-                        .map(|(_, a)| self.out.position() as f64 / a.sample_rate.max(1) as f64)
+                        .map(|(_, _, a)| self.out.position() as f64 / a.sample_rate.max(1) as f64)
                         .unwrap_or(0.0);
                     if self.idx > 0 && heard < RESTART_THRESHOLD_SECS {
                         self.idx -= 1;
                     }
-                    self.start_current(0.0);
+                    self.start_current(0.0, true);
                 }
             }
             Command::NudgeRate(steps) => self.set_rate(self.rate + steps as f32 * RATE_STEP),
@@ -487,7 +489,7 @@ impl Worker {
                 self.cfg = *config;
                 self.invalidate();
                 if self.active {
-                    self.start_current(fraction);
+                    self.start_current(fraction, false);
                 }
             }
             Command::Shutdown => {}
@@ -502,14 +504,14 @@ impl Worker {
         let fraction = self.current_fraction();
         self.rate = rate;
         if self.active {
-            self.start_current(fraction);
+            self.start_current(fraction, false);
         }
     }
 
     /// How far through the current sentence we are, 0.0 ..= 1.0.
     fn current_fraction(&self) -> f64 {
         match &self.loaded {
-            Some((_, audio)) if !audio.samples.is_empty() => {
+            Some((_, _, audio)) if !audio.samples.is_empty() => {
                 (self.out.position() as f64 / audio.samples.len() as f64).clamp(0.0, 1.0)
             }
             // Still waiting for audio: keep whatever was requested before.
@@ -525,7 +527,7 @@ impl Worker {
     fn begin(&mut self) {
         self.active = true;
         self.paused = false;
-        self.start_current(0.0);
+        self.start_current(0.0, true);
     }
 
     fn halt(&mut self) {
@@ -539,7 +541,12 @@ impl Worker {
 
     /// Play sentence `self.idx` at the current rate, from `fraction` of its
     /// length — now if its audio is cached, otherwise as soon as it arrives.
-    fn start_current(&mut self, fraction: f64) {
+    ///
+    /// `interrupt` says what to do in the meantime: skipping to another
+    /// sentence silences the output at once, whereas after a speed or voice
+    /// change the old audio keeps playing until the new one can take over, so
+    /// a slow engine does not cause a gap.
+    fn start_current(&mut self, fraction: f64, interrupt: bool) {
         let key = self.key();
         self.resume_fraction = fraction;
         match self.cache.get(&key).cloned() {
@@ -554,7 +561,7 @@ impl Worker {
                         if self.paused {
                             self.out.pause();
                         }
-                        self.loaded = Some((key, audio));
+                        self.loaded = Some((self.generation, key, audio));
                         self.resume_fraction = 0.0;
                     }
                     Err(err) => {
@@ -565,8 +572,14 @@ impl Worker {
                 }
             }
             None => {
-                self.out.stop();
-                self.loaded = None;
+                let same_sentence = self
+                    .loaded
+                    .as_ref()
+                    .is_some_and(|(_, (i, _), _)| *i == self.idx);
+                if interrupt || !same_sentence {
+                    self.out.stop();
+                    self.loaded = None;
+                }
             }
         }
         self.schedule();
@@ -637,11 +650,18 @@ impl Worker {
             self.cache.insert(key, audio.clone());
         }
         self.jobs.done(generation, key);
-        let wanted = self.active && self.loaded.is_none() && key == self.key();
+        // Is the output already playing exactly this (sentence, rate, voice)?
+        let up_to_date = self
+            .loaded
+            .as_ref()
+            .is_some_and(|(g, k, _)| *g == self.generation && *k == self.key());
+        let wanted = self.active && key == self.key() && !up_to_date;
         match result {
             Ok(_) => {
                 if wanted {
-                    self.start_current(self.resume_fraction);
+                    // If older audio of this sentence is still playing, take
+                    // over from where it is now.
+                    self.start_current(self.current_fraction(), true);
                 } else {
                     self.schedule();
                 }
@@ -661,7 +681,7 @@ impl Worker {
         if self.active && !self.paused && self.loaded.is_some() && self.out.finished() {
             if self.idx + 1 < self.playlist.len() {
                 self.idx += 1;
-                self.start_current(0.0);
+                self.start_current(0.0, true);
             } else {
                 self.halt();
                 self.idx = 0;

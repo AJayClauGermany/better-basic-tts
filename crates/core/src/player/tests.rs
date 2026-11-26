@@ -8,6 +8,8 @@ struct FakeEngine {
     calls: AtomicUsize,
     log: Mutex<Vec<SynthRequest>>,
     fail_on: Option<&'static str>,
+    /// How long one synthesis takes (a neural engine is not instant).
+    delay: Duration,
 }
 
 impl FakeEngine {
@@ -16,6 +18,7 @@ impl FakeEngine {
             calls: AtomicUsize::new(0),
             log: Mutex::new(Vec::new()),
             fail_on: None,
+            delay: Duration::ZERO,
         })
     }
 }
@@ -33,6 +36,7 @@ impl Engine for FakeEngine {
     fn synthesize(&self, req: &SynthRequest) -> anyhow::Result<Audio> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.log.lock().unwrap().push(req.clone());
+        std::thread::sleep(self.delay);
         if self.fail_on.is_some_and(|f| req.text.contains(f)) {
             anyhow::bail!("engine exploded");
         }
@@ -251,6 +255,7 @@ fn engine_failure_surfaces_as_error() {
         calls: AtomicUsize::new(0),
         log: Mutex::new(Vec::new()),
         fail_on: Some("sentence 1"),
+        delay: Duration::ZERO,
     });
     let p = player(engine, 20.0);
     p.speak(utterances(3), "");
@@ -347,4 +352,39 @@ fn notifies_on_change() {
     p.speak(utterances(2), "");
     wait_for(&p, "done", |s| s.status == Status::Idle && s.total == 2);
     assert!(count.load(Ordering::SeqCst) >= 3);
+}
+
+#[test]
+fn slow_engine_keeps_playing_while_new_speed_is_prepared() {
+    let engine = Arc::new(FakeEngine {
+        calls: AtomicUsize::new(0),
+        log: Mutex::new(Vec::new()),
+        fail_on: None,
+        delay: Duration::from_millis(250),
+    });
+    // Real-time clock: a sentence is one second long.
+    let p = player(engine.clone(), 1.0);
+    p.speak(utterances(2), "");
+    wait_for(&p, "playing", |s| s.status == Status::Playing);
+    p.faster();
+    // While the engine works on the faster version, the old audio goes on:
+    // the player must never fall back to "loading".
+    let start = Instant::now();
+    let mut switched = false;
+    while start.elapsed() < Duration::from_millis(600) {
+        let snap = p.snapshot();
+        assert_eq!(snap.status, Status::Playing, "gap while changing speed");
+        assert_eq!(snap.index, 0);
+        switched |= engine
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.text == "sentence 0" && (r.rate - 1.1).abs() < 1e-4);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(switched, "the faster version was never requested");
+    // Skipping, in contrast, interrupts immediately.
+    p.next();
+    wait_for(&p, "loading next", |s| s.index == 1);
 }
