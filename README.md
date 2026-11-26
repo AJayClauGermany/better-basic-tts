@@ -121,6 +121,10 @@ Linux has no bundled system voice, so install eSpeak NG as the baseline:
 sudo apt install espeak-ng
 ```
 
+eSpeak is clear but robotic. For natural-sounding voices on Linux (or anywhere), use
+one of the neural adapters in [`contrib/engines`](contrib/engines/README.md):
+**KittenTTS** (small, fast on a CPU, tested) or **NeuTTS** (voice cloning).
+
 ### Plugging in another local engine
 
 Anything that can turn text into a WAV file can be an engine. Add it to the settings
@@ -142,9 +146,9 @@ involved. Placeholders: `{voice}`, `{rate}`, `{length_scale}` (= 1/rate), `{wpm}
 output; with `raw_sample_rate = 22050` standard output is taken as raw 16-bit mono
 PCM instead.
 
-Engines that are slow to start (neural models) should use the persistent protocol —
-see [`contrib/engines`](contrib/engines/README.md), which includes ready-made
-adapters for KittenTTS and NeuTTS.
+Engines that are slow to start (neural models) should set `persistent = true` and
+speak the small JSON line protocol described in
+[`contrib/engines`](contrib/engines/README.md), so the model is loaded once.
 
 ## Customising how text is read
 
