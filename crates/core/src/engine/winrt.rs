@@ -51,7 +51,7 @@ impl Engine for WinRtEngine {
         if let Some(id) = req.voice.as_deref().filter(|v| !v.is_empty()) {
             let all = SpeechSynthesizer::AllVoices()?;
             for v in &all {
-                if v.Id()?.to_string() == id {
+                if v.Id()? == id {
                     synth.SetVoice(&v)?;
                     break;
                 }
