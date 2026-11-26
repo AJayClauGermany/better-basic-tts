@@ -178,7 +178,7 @@ engine = "auto"            # or "say", "winrt", "espeak", or one of yours
 voice = ""                 # empty = the engine's default voice
 rate = 1.25
 interpreter = "auto"       # auto | plain | markdown | the id of a plugin
-tables = "columns"         # columns | rows
+tables = "rows"            # rows | columns
 angle_brackets = "smart"   # smart | literal | strip_tags | silent
 urls = "domain"            # domain | full | skip
 
@@ -243,9 +243,10 @@ All of it is under **Settings → Voices by role**, where you can also add roles
 
 ### Tables
 
-By default a table is read **column by column**: a column's heading, then its cells
-from top to bottom, then the next column to the right. Each cell is its own sentence,
-so ⏪ / ⏩ step through cells. `tables = "rows"` reads row by row instead.
+Tables are read row by row, the way they are written. Set `tables = "columns"`
+(Settings → Text → Tables) to read them **column by column** instead: a column's
+heading, then its cells from top to bottom, then the next column to the right. Each
+cell is then its own sentence, so ⏪ / ⏩ step through cells.
 
 ### Plugins
 

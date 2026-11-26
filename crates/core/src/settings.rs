@@ -92,7 +92,7 @@ impl Default for Settings {
             rate: 1.0,
             volume: 1.0,
             interpreter: InterpreterKind::Auto.key().into(),
-            tables: TableOrder::Columns,
+            tables: TableOrder::Rows,
             angle_brackets: AngleBrackets::Smart,
             urls: UrlMode::Domain,
             sentence_pause_ms: 90,
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(quote.rate, 1.0);
         assert_eq!(s.engine, "auto");
         assert_eq!(s.interpreter, "auto");
-        assert_eq!(s.tables, TableOrder::Columns);
+        assert_eq!(s.tables, TableOrder::Rows);
     }
 
     #[test]
@@ -682,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn tables_are_read_column_first_by_default() {
+    fn tables_can_be_read_column_first() {
         let mut s = Settings {
             interpreter: "markdown".into(),
             ..Default::default()
@@ -691,6 +691,9 @@ mod tests {
         let read = |s: &Settings| -> Vec<String> {
             s.prepare(table).into_iter().map(|u| u.spoken).collect()
         };
+        // Row by row unless asked otherwise.
+        assert_eq!(read(&s), vec!["Name, Age.", "Ada, 36.", "Linus, 55."]);
+        s.tables = TableOrder::Columns;
         assert_eq!(
             read(&s),
             vec!["Name.", "Ada.", "Linus.", "Age.", "36.", "55."]

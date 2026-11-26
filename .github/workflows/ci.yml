@@ -85,12 +85,11 @@ jobs:
           # Again at a speed-listener's rate.
           ./target/release/better-basic-tts --config fast.toml benchmark
 
-      - name: Probe the native macOS speech API
+      - name: Engine speed (native macOS voice, experimental)
         if: runner.os == 'macOS'
         continue-on-error: true
         timeout-minutes: 8
         run: |
-          ./target/release/better-basic-tts probe-speech
           echo 'engine = "av"' > av.toml
           ./target/release/better-basic-tts --config av.toml benchmark
           printf 'engine = "av"\nrate = 2.5\n' > av-fast.toml

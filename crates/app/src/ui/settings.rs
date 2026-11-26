@@ -456,7 +456,7 @@ fn text_page(cx: &App) -> SettingPage {
                                 }
                             }),
                         )
-                        .default_value("columns"),
+                        .default_value("rows"),
                     )
                     .description(
                         "Column by column reads a column's heading, then its cells from top \

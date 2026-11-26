@@ -16,7 +16,7 @@ Most "read this differently" wishes are settings, not code:
 | "Point" before every item | `list_item`: *Say before each* |
 | Top-level headings slower, with a longer pause | role `heading.1` |
 | Column headings in another voice | role `table.header` |
-| Tables column by column or row by row | Settings → Text → Tables |
+| Tables column by column instead of row by row | Settings → Text → Tables |
 | Never read code | `code`: *Skip* |
 
 Roles are names with dots for more specific kinds. What is not set for

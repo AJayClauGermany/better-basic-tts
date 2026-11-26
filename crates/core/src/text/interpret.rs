@@ -69,16 +69,16 @@ impl InterpreterKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TableOrder {
+    /// Row by row, left to right, the way the table is written.
+    #[default]
+    Rows,
     /// Column by column: a column's heading, then its cells from top to
     /// bottom, then the next column to the right.
-    #[default]
     Columns,
-    /// Row by row, left to right, the way the table is written.
-    Rows,
 }
 
 impl TableOrder {
-    pub const ALL: [TableOrder; 2] = [TableOrder::Columns, TableOrder::Rows];
+    pub const ALL: [TableOrder; 2] = [TableOrder::Rows, TableOrder::Columns];
 
     pub fn label(self) -> &'static str {
         match self {
