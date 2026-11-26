@@ -176,7 +176,7 @@ pub fn speak_and_wait(settings: &Settings, text: &str) -> Result<()> {
         || -> Box<dyn AudioOutput> { Box::new(DeviceOutput::new()) },
         PlayerConfig::from_settings(settings, Some(engine)),
         settings.rate,
-        move || {
+        move |_| {
             let _ = tx.send(());
         },
     );

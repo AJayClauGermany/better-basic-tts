@@ -122,7 +122,7 @@ fn rate_key(rate: f32) -> u32 {
     (rate * 1000.0).round() as u32
 }
 
-type Notify = Arc<dyn Fn() + Send + Sync>;
+type Notify = Arc<dyn Fn(&PlayerSnapshot) + Send + Sync>;
 
 /// Handle to the playback machinery. Clone freely.
 #[derive(Clone)]
@@ -149,13 +149,13 @@ impl Player {
     ///
     /// * `make_output` runs on the control thread (audio devices are not
     ///   `Send` on every platform).
-    /// * `on_change` is called (from the control thread) whenever
-    ///   [`Player::snapshot`] would return something new.
+    /// * `on_change` is called (from the control thread) with every new
+    ///   state, in order; [`Player::snapshot`] returns the latest one.
     pub fn new(
         make_output: impl FnOnce() -> Box<dyn AudioOutput> + Send + 'static,
         config: PlayerConfig,
         rate: f32,
-        on_change: impl Fn() + Send + Sync + 'static,
+        on_change: impl Fn(&PlayerSnapshot) + Send + Sync + 'static,
     ) -> Self {
         let (tx, rx) = flume::unbounded::<Msg>();
         let snapshot = Arc::new(Mutex::new(PlayerSnapshot {
@@ -906,14 +906,14 @@ impl Worker {
         let changed = {
             let mut shared = self.snapshot.lock().unwrap();
             if *shared != snapshot {
-                *shared = snapshot;
+                *shared = snapshot.clone();
                 true
             } else {
                 false
             }
         };
         if changed {
-            (self.notify)();
+            (self.notify)(&snapshot);
         }
     }
 }

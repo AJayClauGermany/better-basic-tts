@@ -149,7 +149,7 @@ pub fn init(settings_path: PathBuf, cx: &mut App) {
         },
         config,
         settings.rate,
-        move || {
+        move |_| {
             let _ = notify.send(Event::PlayerChanged);
         },
     );

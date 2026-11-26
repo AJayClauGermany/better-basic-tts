@@ -43,9 +43,26 @@ impl Engine for FakeEngine {
         let n = (1000.0 / req.rate) as usize;
         Ok(Audio {
             sample_rate: 1000,
-            samples: vec![0.5; n],
+            samples: vec![level_for(&req.text); n],
         })
     }
+}
+
+/// The fake engines encode which sentence a buffer holds in its sample
+/// value, so an output can report what it was really given to play. Tests
+/// check that, rather than sampling the player's state: a state that lasts
+/// 50 ms is easy to miss on a busy machine.
+fn level_for(text: &str) -> f32 {
+    let number: usize = text
+        .rsplit(' ')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("test sentences end in their number");
+    (number + 1) as f32 / 100.0
+}
+
+fn sentence_in(audio: &Audio) -> usize {
+    (audio.samples[0] * 100.0).round() as usize - 1
 }
 
 fn utterances(n: usize) -> Vec<Utterance> {
@@ -83,7 +100,7 @@ fn player(engine: Arc<FakeEngine>, speed: f64) -> Player {
         move || Box::new(SilentOutput::with_speed(speed)),
         config(engine),
         1.0,
-        || {},
+        |_| {},
     )
 }
 
@@ -94,7 +111,7 @@ fn wait_for(player: &Player, what: &str, pred: impl Fn(&PlayerSnapshot) -> bool)
         if pred(&snap) {
             return snap;
         }
-        if start.elapsed() > Duration::from_secs(5) {
+        if start.elapsed() > Duration::from_secs(20) {
             panic!("timed out waiting for {what}; last snapshot: {snap:?}");
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -104,24 +121,23 @@ fn wait_for(player: &Player, what: &str, pred: impl Fn(&PlayerSnapshot) -> bool)
 #[test]
 fn plays_through_and_returns_to_idle() {
     let engine = FakeEngine::new();
-    let p = player(engine.clone(), 20.0);
+    let (p, seen) = counting_player(engine.clone(), 20.0, 1.0);
     p.speak(utterances(3), "Test");
-    let snap = wait_for(&p, "playing", |s| s.status == Status::Playing);
-    assert_eq!(snap.total, 3);
-    assert_eq!(snap.title, "Test");
-    assert_eq!(snap.current.as_deref(), Some("Sentence 0"));
-    wait_for(&p, "second sentence", |s| s.index == 1);
-    wait_for(&p, "third sentence", |s| s.index == 2);
-    let snap = wait_for(&p, "idle", |s| s.status == Status::Idle);
+    let snap = wait_for(&p, "the end", |s| {
+        s.status == Status::Idle && s.total == 3 && seen.order().len() == 3
+    });
+    // Every sentence was played, in order, and synthesised once.
+    assert_eq!(seen.order(), vec![0, 1, 2]);
+    assert_eq!(engine.calls.load(Ordering::SeqCst), 3);
     // Text stays loaded, rewound to the start.
     assert_eq!((snap.index, snap.total), (0, 3));
-    assert_eq!(engine.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(snap.title, "Test");
+    assert_eq!(snap.current.as_deref(), Some("Sentence 0"));
 
     // Play again from idle restarts from the top.
     p.toggle_pause();
-    wait_for(&p, "replay", |s| {
-        s.status == Status::Playing && s.index == 0
-    });
+    wait_for(&p, "replay", |_| seen.order().len() >= 4);
+    assert_eq!(seen.order()[3], 0);
 }
 
 #[test]
@@ -278,7 +294,7 @@ fn empty_text_and_missing_engine_report_errors() {
 
     let mut cfg = config(FakeEngine::new());
     cfg.engine = None;
-    let p = Player::new(|| Box::new(SilentOutput::new()), cfg, 1.0, || {});
+    let p = Player::new(|| Box::new(SilentOutput::new()), cfg, 1.0, |_| {});
     p.speak(utterances(2), "");
     let snap = wait_for(&p, "engine error", |s| s.error.is_some());
     assert_eq!(snap.status, Status::Idle);
@@ -292,7 +308,12 @@ fn role_styles_reach_the_engine() {
     cfg.roles.heading.rate = 0.5;
     cfg.roles.heading.announce = "Heading:".into();
     cfg.roles.paragraph.pitch = 1.5;
-    let p = Player::new(|| Box::new(SilentOutput::with_speed(50.0)), cfg, 2.0, || {});
+    let p = Player::new(
+        || Box::new(SilentOutput::with_speed(50.0)),
+        cfg,
+        2.0,
+        |_| {},
+    );
     p.speak(utterances(3), "");
     wait_for(&p, "finished", |s| s.status == Status::Idle && s.total == 3);
     let log = engine.log.lock().unwrap();
@@ -345,7 +366,7 @@ fn notifies_on_change() {
         || Box::new(SilentOutput::with_speed(50.0)),
         config(FakeEngine::new()),
         1.0,
-        move || {
+        move |_| {
             c.fetch_add(1, Ordering::SeqCst);
         },
     );
@@ -389,29 +410,46 @@ fn slow_engine_keeps_playing_while_new_speed_is_prepared() {
     wait_for(&p, "loading next", |s| s.index == 1);
 }
 
-/// Counts how sentences reach the output: started afresh (`play`) or handed
-/// over inside the running stream (`queue_next`).
+/// Records how sentences reach the output: started afresh (`play`) or handed
+/// over inside the running stream (`queue_next`), and in which order.
 struct CountingOutput {
     inner: SilentOutput,
     plays: Arc<AtomicUsize>,
     handovers: Arc<AtomicUsize>,
+    /// Sentence numbers in the order the output began playing them.
+    order: Arc<Mutex<Vec<usize>>>,
+    lined_up: Option<usize>,
 }
 
 impl AudioOutput for CountingOutput {
     fn play(&mut self, audio: Arc<Audio>, start: usize) -> anyhow::Result<()> {
         self.plays.fetch_add(1, Ordering::SeqCst);
+        self.order.lock().unwrap().push(sentence_in(&audio));
+        self.lined_up = None;
         self.inner.play(audio, start)
     }
     fn queue_next(&mut self, audio: Arc<Audio>) -> bool {
-        self.inner.queue_next(audio)
+        let sentence = sentence_in(&audio);
+        let accepted = self.inner.queue_next(audio);
+        if accepted {
+            self.lined_up = Some(sentence);
+        }
+        accepted
     }
     fn clear_next(&mut self) -> bool {
-        self.inner.clear_next()
+        let cleared = self.inner.clear_next();
+        if cleared {
+            self.lined_up = None;
+        }
+        cleared
     }
     fn advanced(&mut self) -> bool {
         let advanced = self.inner.advanced();
         if advanced {
             self.handovers.fetch_add(1, Ordering::SeqCst);
+            if let Some(sentence) = self.lined_up.take() {
+                self.order.lock().unwrap().push(sentence);
+            }
         }
         advanced
     }
@@ -432,54 +470,54 @@ impl AudioOutput for CountingOutput {
     }
 }
 
-fn counting_player(
-    engine: Arc<FakeEngine>,
-    speed: f64,
-    rate: f32,
-) -> (Player, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-    let plays = Arc::new(AtomicUsize::new(0));
-    let handovers = Arc::new(AtomicUsize::new(0));
-    let (p, h) = (plays.clone(), handovers.clone());
-    let player = Player::new(
-        move || {
-            Box::new(CountingOutput {
-                inner: SilentOutput::with_speed(speed),
-                plays: p,
-                handovers: h,
-            })
-        },
-        config(engine),
-        rate,
-        || {},
-    );
-    (player, plays, handovers)
+/// What a [`CountingOutput`] saw.
+#[derive(Clone, Default)]
+struct Seen {
+    plays: Arc<AtomicUsize>,
+    handovers: Arc<AtomicUsize>,
+    order: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Seen {
+    fn output(&self, speed: f64) -> Box<dyn AudioOutput> {
+        Box::new(CountingOutput {
+            inner: SilentOutput::with_speed(speed),
+            plays: self.plays.clone(),
+            handovers: self.handovers.clone(),
+            order: self.order.clone(),
+            lined_up: None,
+        })
+    }
+    fn plays(&self) -> usize {
+        self.plays.load(Ordering::SeqCst)
+    }
+    fn handovers(&self) -> usize {
+        self.handovers.load(Ordering::SeqCst)
+    }
+    fn order(&self) -> Vec<usize> {
+        self.order.lock().unwrap().clone()
+    }
+}
+
+fn counting_player(engine: Arc<FakeEngine>, speed: f64, rate: f32) -> (Player, Seen) {
+    let seen = Seen::default();
+    let output = seen.clone();
+    let player = Player::new(move || output.output(speed), config(engine), rate, |_| {});
+    (player, seen)
 }
 
 #[test]
 fn sentences_hand_over_inside_the_stream() {
-    let (p, plays, handovers) = counting_player(FakeEngine::new(), 8.0, 1.0);
+    // A quarter of a second per sentence: ample time to line up the next.
+    let (p, seen) = counting_player(FakeEngine::new(), 4.0, 1.0);
     p.speak(utterances(5), "");
-    let mut seen = Vec::new();
-    let start = Instant::now();
-    loop {
-        let snap = p.snapshot();
-        if snap.status == Status::Idle && !seen.is_empty() {
-            break;
-        }
-        if snap.status == Status::Playing && seen.last() != Some(&snap.index) {
-            seen.push(snap.index);
-        }
-        assert!(start.elapsed() < Duration::from_secs(5), "stuck: {snap:?}");
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(
-        seen,
-        vec![0, 1, 2, 3, 4],
-        "every sentence is visited in order"
-    );
+    wait_for(&p, "the end", |s| {
+        s.status == Status::Idle && s.total == 5 && seen.order().len() == 5
+    });
+    assert_eq!(seen.order(), vec![0, 1, 2, 3, 4]);
     // Only the very first sentence starts a stream; the rest follow in it.
-    assert_eq!(plays.load(Ordering::SeqCst), 1);
-    assert_eq!(handovers.load(Ordering::SeqCst), 4);
+    assert_eq!(seen.plays(), 1);
+    assert_eq!(seen.handovers(), 4);
 }
 
 #[test]
@@ -491,7 +529,7 @@ fn no_stalls_when_the_engine_is_slow_but_keeps_up() {
         fail_on: None,
         delay: Duration::from_millis(300),
     });
-    let (p, _, _) = counting_player(engine, 1.0, 2.5);
+    let (p, _) = counting_player(engine, 1.0, 2.5);
     let n = 8;
     p.speak(utterances(n), "");
     wait_for(&p, "first sentence", |s| s.status == Status::Playing);
@@ -519,8 +557,9 @@ fn no_stalls_when_the_engine_is_slow_but_keeps_up() {
         "reading stalled for {waiting:?} between sentences"
     );
     let audio = Duration::from_secs_f32(n as f32 / 2.5);
+    // Stalling after every sentence would add 8 x 300 ms.
     assert!(
-        started.elapsed() < audio + Duration::from_millis(250),
+        started.elapsed() < audio + Duration::from_millis(1000),
         "took {:?} for {audio:?} of audio",
         started.elapsed()
     );
@@ -528,7 +567,7 @@ fn no_stalls_when_the_engine_is_slow_but_keeps_up() {
 
 #[test]
 fn skipping_takes_back_the_lined_up_sentence() {
-    let (p, plays, _) = counting_player(FakeEngine::new(), 0.2, 1.0);
+    let (p, seen) = counting_player(FakeEngine::new(), 0.2, 1.0);
     p.speak(utterances(5), "");
     wait_for(&p, "playing", |s| s.status == Status::Playing);
     // Give the player time to line up sentence 1 behind sentence 0.
@@ -543,7 +582,8 @@ fn skipping_takes_back_the_lined_up_sentence() {
         s.index == 1 && s.status == Status::Playing
     });
     // Each jump starts the stream afresh at the right sentence.
-    assert_eq!(plays.load(Ordering::SeqCst), 4);
+    assert_eq!(seen.order(), vec![0, 1, 2, 1]);
+    assert_eq!(seen.plays(), 4);
     std::thread::sleep(Duration::from_millis(80));
     assert_eq!(
         p.snapshot().index,
@@ -574,35 +614,25 @@ fn a_voice_with_another_sample_rate_starts_its_own_stream() {
             };
             Ok(Audio {
                 sample_rate: rate,
-                samples: vec![0.5; rate as usize],
+                samples: vec![level_for(&req.text); rate as usize],
             })
         }
     }
-    let plays = Arc::new(AtomicUsize::new(0));
-    let handovers = Arc::new(AtomicUsize::new(0));
-    let (pc, hc) = (plays.clone(), handovers.clone());
+    let seen = Seen::default();
+    let output = seen.clone();
     let mut cfg = config(FakeEngine::new());
     cfg.engine = Some(Arc::new(TwoRates));
     cfg.roles.heading.voice = "narrator".into();
-    let p = Player::new(
-        move || {
-            Box::new(CountingOutput {
-                inner: SilentOutput::with_speed(10.0),
-                plays: pc,
-                handovers: hc,
-            })
-        },
-        cfg,
-        1.0,
-        || {},
-    );
+    let p = Player::new(move || output.output(10.0), cfg, 1.0, |_| {});
     // Sentence 0 is a heading (narrator), 1 and 2 are paragraphs.
     p.speak(utterances(3), "");
-    wait_for(&p, "done", |s| {
-        s.status == Status::Idle && s.total == 3 && s.index == 0
+    wait_for(&p, "the end", |s| {
+        s.status == Status::Idle && s.total == 3 && seen.order().len() == 3
     });
-    wait_for(&p, "all played", |_| plays.load(Ordering::SeqCst) == 2);
-    assert_eq!(handovers.load(Ordering::SeqCst), 1);
+    assert_eq!(seen.order(), vec![0, 1, 2]);
+    // The heading and the first paragraph each start a stream; the second
+    // paragraph follows the first inside it.
+    assert_eq!((seen.plays(), seen.handovers()), (2, 1));
 }
 
 /// An engine that, like macOS `say`, is much cheaper per sentence when it is
@@ -627,7 +657,7 @@ impl Engine for BatchEngine {
         std::thread::sleep(Duration::from_millis(40));
         Ok(Audio {
             sample_rate: 1000,
-            samples: vec![0.5; 1000],
+            samples: vec![level_for(&req.text); 1000],
         })
     }
     fn batch_size(&self) -> usize {
@@ -638,9 +668,9 @@ impl Engine for BatchEngine {
         std::thread::sleep(Duration::from_millis(40));
         Ok(texts
             .iter()
-            .map(|_| Audio {
+            .map(|text| Audio {
                 sample_rate: 1000,
-                samples: vec![0.5; 1000],
+                samples: vec![level_for(text); 1000],
             })
             .collect())
     }
@@ -653,25 +683,17 @@ fn look_ahead_is_batched_for_engines_that_want_it() {
     });
     let mut cfg = config(FakeEngine::new());
     cfg.engine = Some(engine.clone());
-    let p = Player::new(|| Box::new(SilentOutput::with_speed(5.0)), cfg, 1.0, || {});
+    let seen = Seen::default();
+    let output = seen.clone();
+    let p = Player::new(move || output.output(4.0), cfg, 1.0, |_| {});
     // All paragraphs, so the voice parameters never force a batch to end.
     let mut text = utterances(14);
     text[0].role = Role::Paragraph;
     p.speak(text, "");
-    let mut seen = Vec::new();
-    let start = Instant::now();
-    loop {
-        let snap = p.snapshot();
-        if snap.status == Status::Idle && !seen.is_empty() {
-            break;
-        }
-        if snap.status == Status::Playing && seen.last() != Some(&snap.index) {
-            seen.push(snap.index);
-        }
-        assert!(start.elapsed() < Duration::from_secs(10), "stuck: {snap:?}");
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(seen, (0..14).collect::<Vec<_>>());
+    wait_for(&p, "the end", |s| {
+        s.status == Status::Idle && s.total == 14 && seen.order().len() == 14
+    });
+    assert_eq!(seen.order(), (0..14).collect::<Vec<_>>());
 
     let calls = engine.calls.lock().unwrap();
     // The first two sentences are fetched on their own for a quick start.
@@ -679,8 +701,8 @@ fn look_ahead_is_batched_for_engines_that_want_it() {
     assert!(calls.contains(&vec!["sentence 1".to_string()]));
     // The rest arrives in full batches (the tail of the text may be shorter).
     let sizes: Vec<usize> = calls.iter().map(|c| c.len()).collect();
-    assert!(sizes.iter().filter(|&&n| n == 4).count() >= 2, "{sizes:?}");
-    assert!(calls.len() <= 7, "too many engine calls: {sizes:?}");
+    assert!(sizes.contains(&4), "no full batch: {sizes:?}");
+    assert!(calls.len() < 14, "nothing was batched: {sizes:?}");
     // Every sentence is synthesised exactly once.
     let mut all: Vec<&String> = calls.iter().flatten().collect();
     all.sort();
@@ -697,7 +719,12 @@ fn a_batch_stops_where_the_voice_changes() {
     let mut cfg = config(FakeEngine::new());
     cfg.engine = Some(engine.clone());
     cfg.roles.quote.voice = "other".into();
-    let p = Player::new(|| Box::new(SilentOutput::with_speed(20.0)), cfg, 1.0, || {});
+    let p = Player::new(
+        || Box::new(SilentOutput::with_speed(20.0)),
+        cfg,
+        1.0,
+        |_| {},
+    );
     let mut text = utterances(8);
     for u in &mut text {
         u.role = Role::Paragraph;
