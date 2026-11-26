@@ -1,18 +1,28 @@
 //! Interpreters: turn text into blocks with roles.
 //!
 //! This is the main extension point for "how should this text be read".
-//! Adding a new format means adding a variant to [`InterpreterKind`] and a
-//! function that returns `Vec<Block>`; everything downstream (voices per
-//! role, pauses, sentence navigation) keeps working unchanged.
+//! The built-in interpreters live here; an external program can replace or
+//! post-process their output without recompiling anything (see
+//! [`super::plugin`]). Everything downstream (voices per role, pauses,
+//! announcements, sentence navigation) only looks at the role names.
 
 use super::Role;
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Block {
     pub role: Role,
     pub text: String,
+}
+
+impl Block {
+    pub fn new(role: Role, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            text: text.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -41,19 +51,71 @@ impl InterpreterKind {
             InterpreterKind::Markdown => "Markdown",
         }
     }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            InterpreterKind::Auto => "auto",
+            InterpreterKind::Plain => "plain",
+            InterpreterKind::Markdown => "markdown",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.key() == key)
+    }
 }
 
-pub fn interpret(text: &str, kind: InterpreterKind) -> Vec<Block> {
-    let markdown = match kind {
+/// In which order the cells of a table are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TableOrder {
+    /// Column by column: a column's heading, then its cells from top to
+    /// bottom, then the next column to the right.
+    #[default]
+    Columns,
+    /// Row by row, left to right, the way the table is written.
+    Rows,
+}
+
+impl TableOrder {
+    pub const ALL: [TableOrder; 2] = [TableOrder::Columns, TableOrder::Rows];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TableOrder::Columns => "Column by column",
+            TableOrder::Rows => "Row by row",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            TableOrder::Columns => "columns",
+            TableOrder::Rows => "rows",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MarkdownOptions {
+    pub tables: TableOrder,
+}
+
+pub fn interpret(text: &str, kind: InterpreterKind, markdown: &MarkdownOptions) -> Vec<Block> {
+    let is_markdown = match kind {
         InterpreterKind::Plain => false,
         InterpreterKind::Markdown => true,
         InterpreterKind::Auto => detect_markdown(text),
     };
-    let mut blocks = if markdown {
-        interpret_markdown(text)
+    tidy(if is_markdown {
+        interpret_markdown(text, markdown)
     } else {
         interpret_plain(text)
-    };
+    })
+}
+
+/// Normalise whitespace in blocks and drop the empty ones. Also applied to
+/// what plugins return.
+pub(crate) fn tidy(mut blocks: Vec<Block>) -> Vec<Block> {
     for b in &mut blocks {
         b.text = collapse_spaces(&b.text);
     }
@@ -101,10 +163,7 @@ fn interpret_plain(text: &str) -> Vec<Block> {
     for line in text.lines() {
         if line.trim().is_empty() {
             if !current.is_empty() {
-                blocks.push(Block {
-                    role: Role::Paragraph,
-                    text: std::mem::take(&mut current),
-                });
+                blocks.push(Block::new(Role::paragraph(), std::mem::take(&mut current)));
             }
         } else {
             if !current.is_empty() {
@@ -114,10 +173,7 @@ fn interpret_plain(text: &str) -> Vec<Block> {
         }
     }
     if !current.is_empty() {
-        blocks.push(Block {
-            role: Role::Paragraph,
-            text: current,
-        });
+        blocks.push(Block::new(Role::paragraph(), current));
     }
     blocks
 }
@@ -172,7 +228,104 @@ pub fn detect_markdown(text: &str) -> bool {
     score >= 3
 }
 
-fn interpret_markdown(text: &str) -> Vec<Block> {
+/// What kind of block the text being collected belongs to.
+#[derive(Clone, PartialEq)]
+enum Leaf {
+    Paragraph,
+    Heading(Role),
+    Code(Role),
+}
+
+fn heading_role(level: HeadingLevel) -> Role {
+    let n = match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    };
+    Role::heading().specific(&n.to_string())
+}
+
+/// `code.python` for a block fenced with "```python", plain `code` otherwise.
+fn code_role(kind: &CodeBlockKind) -> Role {
+    let language = match kind {
+        CodeBlockKind::Fenced(info) => info
+            .split([' ', ',', '{', '\t'])
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches('.'),
+        CodeBlockKind::Indented => "",
+    };
+    let language: String = language
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '+' | '#'))
+        .collect::<String>()
+        .replace('+', "p")
+        .replace('#', "sharp");
+    if language.is_empty() {
+        Role::code()
+    } else {
+        Role::code().specific(&language)
+    }
+}
+
+/// End a cell with a full stop so that each cell is its own sentence, however
+/// long it is.
+fn as_sentence(cell: &str) -> String {
+    let cell = cell.trim();
+    if cell.is_empty() || cell.ends_with(['.', '!', '?', ':', ';', '…']) {
+        cell.to_string()
+    } else {
+        format!("{cell}.")
+    }
+}
+
+fn table_blocks(rows: Vec<Vec<String>>, has_header: bool, order: TableOrder) -> Vec<Block> {
+    let table = Role::new(Role::TABLE);
+    let (header, cell, row) = (
+        table.specific("header"),
+        table.specific("cell"),
+        table.specific("row"),
+    );
+    let mut blocks = Vec::new();
+    match order {
+        TableOrder::Rows => {
+            for (i, cells) in rows.iter().enumerate() {
+                let text = cells
+                    .iter()
+                    .map(|c| c.trim())
+                    .filter(|c| !c.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let role = if i == 0 && has_header { &header } else { &row };
+                blocks.push(Block::new(role.clone(), as_sentence(&text)));
+            }
+        }
+        TableOrder::Columns => {
+            let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+            for column in 0..columns {
+                let mut cells = rows.iter().map(|r| r.get(column).map(String::as_str));
+                if has_header {
+                    if let Some(Some(heading)) = cells.next() {
+                        blocks.push(Block::new(header.clone(), as_sentence(heading)));
+                    }
+                }
+                let text = cells
+                    .flatten()
+                    .map(as_sentence)
+                    .filter(|c| !c.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                blocks.push(Block::new(cell.clone(), text));
+            }
+        }
+    }
+    blocks
+}
+
+fn interpret_markdown(text: &str, markdown: &MarkdownOptions) -> Vec<Block> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -183,27 +336,25 @@ fn interpret_markdown(text: &str) -> Vec<Block> {
     let mut buf = String::new();
     // Container roles (quote, list item) override the paragraph role inside.
     let mut containers: Vec<Role> = Vec::new();
-    let mut leaf: Option<Role> = None;
+    let mut leaf: Option<Leaf> = None;
     let mut list_counters: Vec<Option<u64>> = Vec::new();
     let mut pending_item_prefix: Option<String> = None;
-    let mut in_image = false;
+    // The table being collected: rows of cells, the first being the header.
+    let mut table: Option<Vec<Vec<String>>> = None;
+    let mut table_has_header = false;
 
     fn flush(blocks: &mut Vec<Block>, buf: &mut String, role: Role) {
         let text = buf.trim();
         if !text.is_empty() {
-            blocks.push(Block {
-                role,
-                text: text.to_string(),
-            });
+            blocks.push(Block::new(role, text));
         }
         buf.clear();
     }
 
-    let current_role = |containers: &Vec<Role>, leaf: Option<Role>| -> Role {
+    let current_role = |containers: &Vec<Role>, leaf: &Option<Leaf>| -> Role {
         match leaf {
-            Some(Role::Heading) => Role::Heading,
-            Some(Role::Code) => Role::Code,
-            _ => containers.last().copied().unwrap_or(Role::Paragraph),
+            Some(Leaf::Heading(role)) | Some(Leaf::Code(role)) => role.clone(),
+            _ => containers.last().cloned().unwrap_or_else(Role::paragraph),
         }
     };
 
@@ -211,81 +362,90 @@ fn interpret_markdown(text: &str) -> Vec<Block> {
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
-                    leaf = Some(Role::Paragraph);
+                    leaf = Some(Leaf::Paragraph);
                 }
-                Tag::Heading { .. } => {
-                    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
-                    leaf = Some(Role::Heading);
+                Tag::Heading { level, .. } => {
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
+                    leaf = Some(Leaf::Heading(heading_role(level)));
                 }
                 Tag::BlockQuote(_) => {
-                    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
-                    containers.push(Role::Quote);
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
+                    containers.push(Role::quote());
                 }
-                Tag::CodeBlock(_) => {
-                    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
-                    leaf = Some(Role::Code);
+                Tag::CodeBlock(kind) => {
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
+                    leaf = Some(Leaf::Code(code_role(&kind)));
                 }
                 Tag::List(start) => {
-                    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
                     list_counters.push(start);
                 }
                 Tag::Item => {
-                    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
                     // Quotes keep their role even for lists inside them.
-                    if containers.last() != Some(&Role::Quote) {
-                        containers.push(Role::ListItem);
+                    if containers.last().is_some_and(|r| r.is_a(Role::QUOTE)) {
+                        containers.push(Role::quote());
                     } else {
-                        containers.push(Role::Quote);
+                        containers.push(Role::list_item());
                     }
                     if let Some(Some(n)) = list_counters.last_mut() {
                         pending_item_prefix = Some(format!("{n}. "));
                         *n += 1;
                     }
                 }
-                Tag::Image { .. } => {
-                    in_image = true;
-                    buf.push_str("Image: ");
+                Tag::Image { .. } => buf.push_str("Image: "),
+                Tag::Table(_) => {
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
+                    table = Some(Vec::new());
+                    table_has_header = false;
                 }
-                Tag::TableCell => {}
-                Tag::TableHead | Tag::TableRow => {}
+                Tag::TableHead => {
+                    table_has_header = true;
+                    if let Some(rows) = &mut table {
+                        rows.push(Vec::new());
+                    }
+                }
+                Tag::TableRow => {
+                    if let Some(rows) = &mut table {
+                        rows.push(Vec::new());
+                    }
+                }
+                Tag::TableCell => buf.clear(),
                 _ => {}
             },
             Event::End(tag) => match tag {
                 TagEnd::Paragraph => {
-                    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
                     leaf = None;
                 }
-                TagEnd::Heading(_) => {
-                    flush(&mut blocks, &mut buf, Role::Heading);
-                    leaf = None;
-                }
-                TagEnd::CodeBlock => {
-                    flush(&mut blocks, &mut buf, Role::Code);
+                TagEnd::Heading(_) | TagEnd::CodeBlock => {
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
                     leaf = None;
                 }
                 TagEnd::BlockQuote(_) => {
-                    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
                     containers.pop();
                 }
                 TagEnd::Item => {
-                    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
+                    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
                     containers.pop();
                     pending_item_prefix = None;
                 }
                 TagEnd::List(_) => {
                     list_counters.pop();
                 }
-                TagEnd::Image => {
-                    in_image = false;
-                    buf.push_str(". ");
+                TagEnd::Image => buf.push_str(". "),
+                TagEnd::TableCell => {
+                    let cell = std::mem::take(&mut buf);
+                    if let Some(row) = table.as_mut().and_then(|rows| rows.last_mut()) {
+                        row.push(cell.trim().to_string());
+                    }
                 }
-                TagEnd::TableCell => buf.push_str(", "),
-                TagEnd::TableHead | TagEnd::TableRow => {
-                    let trimmed = buf.trim_end_matches([',', ' ']).to_string();
+                TagEnd::Table => {
+                    if let Some(rows) = table.take() {
+                        blocks.extend(table_blocks(rows, table_has_header, markdown.tables));
+                    }
                     buf.clear();
-                    buf.push_str(&trimmed);
-                    buf.push('.');
-                    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
                 }
                 _ => {}
             },
@@ -304,16 +464,15 @@ fn interpret_markdown(text: &str) -> Vec<Block> {
             Event::SoftBreak => buf.push(' '),
             Event::HardBreak => buf.push('\n'),
             Event::Rule => {
-                flush(&mut blocks, &mut buf, current_role(&containers, leaf));
+                flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
             }
             Event::TaskListMarker(done) => {
                 buf.push_str(if done { "Done: " } else { "To do: " });
             }
             Event::FootnoteReference(_) => {}
         }
-        let _ = in_image;
     }
-    flush(&mut blocks, &mut buf, current_role(&containers, leaf));
+    flush(&mut blocks, &mut buf, current_role(&containers, &leaf));
     blocks
 }
 
@@ -321,40 +480,72 @@ fn interpret_markdown(text: &str) -> Vec<Block> {
 mod tests {
     use super::*;
 
-    fn md(text: &str) -> Vec<(Role, String)> {
-        interpret(text, InterpreterKind::Markdown)
+    fn with(text: &str, kind: InterpreterKind, tables: TableOrder) -> Vec<(String, String)> {
+        interpret(text, kind, &MarkdownOptions { tables })
             .into_iter()
-            .map(|b| (b.role, b.text))
+            .map(|b| (b.role.to_string(), b.text))
             .collect()
+    }
+
+    fn md(text: &str) -> Vec<(String, String)> {
+        with(text, InterpreterKind::Markdown, TableOrder::default())
+    }
+
+    fn pair(role: &str, text: &str) -> (String, String) {
+        (role.to_string(), text.to_string())
     }
 
     #[test]
     fn plain_paragraphs() {
-        let b = interpret("One\ntwo\n\n\nThree", InterpreterKind::Plain);
-        assert_eq!(b.len(), 2);
-        assert_eq!(b[0].text, "One\ntwo");
-        assert_eq!(b[1].text, "Three");
+        let b = with(
+            "One\ntwo\n\n\nThree",
+            InterpreterKind::Plain,
+            TableOrder::Rows,
+        );
+        assert_eq!(
+            b,
+            vec![pair("paragraph", "One\ntwo"), pair("paragraph", "Three")]
+        );
     }
 
     #[test]
     fn plain_never_treats_markup() {
-        let b = interpret("# not a heading\n> not a quote", InterpreterKind::Plain);
+        let b = with(
+            "# not a heading\n> not a quote",
+            InterpreterKind::Plain,
+            TableOrder::Rows,
+        );
         assert_eq!(b.len(), 1);
-        assert_eq!(b[0].role, Role::Paragraph);
+        assert_eq!(b[0].0, "paragraph");
     }
 
     #[test]
     fn markdown_blocks() {
-        let b = md("# Title\n\nSome *emphasis* and `code` and [a link](http://x.y).\n\n> Quoted\n> text\n\n- one\n- two\n\n```rust\nlet a = 1;\n```\n");
-        assert_eq!(b[0], (Role::Heading, "Title".into()));
+        let b = md("# Title\n\nSome *emphasis* and `code` and [a link](http://x.y).\n\n> Quoted\n> text\n\n- one\n- two\n\n```rust\nlet a = 1;\n```\n\n## Sub\n\n    indented code\n");
         assert_eq!(
-            b[1],
-            (Role::Paragraph, "Some emphasis and code and a link.".into())
+            b,
+            vec![
+                pair("heading.1", "Title"),
+                pair("paragraph", "Some emphasis and code and a link."),
+                pair("quote", "Quoted text"),
+                pair("list_item", "one"),
+                pair("list_item", "two"),
+                pair("code.rust", "let a = 1;"),
+                pair("heading.2", "Sub"),
+                pair("code", "indented code"),
+            ]
         );
-        assert_eq!(b[2], (Role::Quote, "Quoted text".into()));
-        assert_eq!(b[3], (Role::ListItem, "one".into()));
-        assert_eq!(b[4], (Role::ListItem, "two".into()));
-        assert_eq!(b[5], (Role::Code, "let a = 1;".into()));
+    }
+
+    #[test]
+    fn code_languages_become_roles() {
+        let role = |fence: &str| md(&format!("```{fence}\nx\n```\n"))[0].0.clone();
+        assert_eq!(role("python"), "code.python");
+        assert_eq!(role("JavaScript title=\"a.js\""), "code.javascript");
+        assert_eq!(role("c++"), "code.cpp");
+        assert_eq!(role("c#"), "code.csharp");
+        assert_eq!(role("{.haskell}"), "code");
+        assert_eq!(role(""), "code");
     }
 
     #[test]
@@ -382,10 +573,50 @@ mod tests {
         assert!(!detect_markdown("- a single dash line"));
     }
 
+    const TABLE: &str = "Before.\n\n| Name | Age | City |\n|---|---|---|\n| Ada | 36 | London |\n| Linus | 55 |  |\n\nAfter.\n";
+
     #[test]
-    fn table_rows() {
-        let b = md("| a | b |\n|---|---|\n| 1 | 2 |\n");
-        assert_eq!(b[0].1, "a, b.");
-        assert_eq!(b[1].1, "1, 2.");
+    fn tables_row_by_row() {
+        let b = with(TABLE, InterpreterKind::Markdown, TableOrder::Rows);
+        assert_eq!(
+            b,
+            vec![
+                pair("paragraph", "Before."),
+                pair("table.header", "Name, Age, City."),
+                pair("table.row", "Ada, 36, London."),
+                pair("table.row", "Linus, 55."),
+                pair("paragraph", "After."),
+            ]
+        );
+    }
+
+    #[test]
+    fn tables_column_by_column() {
+        let b = with(TABLE, InterpreterKind::Markdown, TableOrder::Columns);
+        assert_eq!(
+            b,
+            vec![
+                pair("paragraph", "Before."),
+                pair("table.header", "Name."),
+                pair("table.cell", "Ada.\nLinus."),
+                pair("table.header", "Age."),
+                pair("table.cell", "36.\n55."),
+                pair("table.header", "City."),
+                // The empty cell is not read.
+                pair("table.cell", "London."),
+                pair("paragraph", "After."),
+            ]
+        );
+    }
+
+    #[test]
+    fn table_cells_keep_inline_text() {
+        let b = with(
+            "| A | B |\n|---|---|\n| `x < y` and **bold** | [link](http://e.x) |\n",
+            InterpreterKind::Markdown,
+            TableOrder::Columns,
+        );
+        assert_eq!(b[1], pair("table.cell", "x < y and bold."));
+        assert_eq!(b[3], pair("table.cell", "link."));
     }
 }

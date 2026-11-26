@@ -81,7 +81,8 @@ pub struct Substitution {
     pub regex: bool,
     #[serde(default)]
     pub case_sensitive: bool,
-    /// Limit the rule to some roles. Empty means all roles.
+    /// Limit the rule to some roles (and their more specific kinds: a rule
+    /// for `code` also applies to `code.python`). Empty means all roles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<Role>,
 }
@@ -147,7 +148,7 @@ impl Speakable {
         }
     }
 
-    pub(crate) fn apply(&self, sentence: &str, role: Role) -> String {
+    pub(crate) fn apply(&self, sentence: &str, role: &Role) -> String {
         let mut text = sentence.to_string();
 
         // 1. URLs (before brackets so that <https://autolinks> work).
@@ -166,7 +167,7 @@ impl Speakable {
 
         // 2. User substitutions see the text as written.
         for (re, replacement, roles) in &self.substitutions {
-            if roles.is_empty() || roles.contains(&role) {
+            if roles.is_empty() || roles.iter().any(|r| role.is_a(r.as_str())) {
                 text = re.replace_all(&text, replacement.as_str()).into_owned();
             }
         }
@@ -187,7 +188,7 @@ impl Speakable {
 
 /// Convenience wrapper used by tests and one-off callers.
 #[cfg(test)]
-pub(crate) fn make_speakable(sentence: &str, role: Role, opts: &SpeakableOptions) -> String {
+pub(crate) fn make_speakable(sentence: &str, role: &Role, opts: &SpeakableOptions) -> String {
     Speakable::new(opts).apply(sentence, role)
 }
 
@@ -333,13 +334,13 @@ mod tests {
     use super::*;
 
     fn smart(s: &str) -> String {
-        make_speakable(s, Role::Paragraph, &SpeakableOptions::default())
+        make_speakable(s, &Role::paragraph(), &SpeakableOptions::default())
     }
 
     fn with(mode: AngleBrackets, s: &str) -> String {
         make_speakable(
             s,
-            Role::Paragraph,
+            &Role::paragraph(),
             &SpeakableOptions {
                 angle_brackets: mode,
                 ..Default::default()
@@ -414,7 +415,7 @@ mod tests {
         assert_eq!(smart("Docs: https://docs.rs/regex."), "Docs: docs.rs link.");
         let full = make_speakable(
             "at http://a.b/c now",
-            Role::Paragraph,
+            &Role::paragraph(),
             &SpeakableOptions {
                 urls: UrlMode::Full,
                 ..Default::default()
@@ -439,7 +440,7 @@ mod tests {
                     replacement: "version $1 point $2".into(),
                     regex: true,
                     case_sensitive: false,
-                    roles: vec![Role::Heading],
+                    roles: vec![Role::heading()],
                 },
                 Substitution {
                     pattern: "(unclosed".into(),
@@ -452,11 +453,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            make_speakable("GPUI v1.2", Role::Paragraph, &opts),
+            make_speakable("GPUI v1.2", &Role::paragraph(), &opts),
             "G P U I v1.2"
         );
         assert_eq!(
-            make_speakable("GPUI v1.2", Role::Heading, &opts),
+            make_speakable("GPUI v1.2", &Role::new("heading.2"), &opts),
             "G P U I version 1 point 2"
         );
     }

@@ -34,7 +34,6 @@ pub fn run(settings_path: PathBuf, initial: Option<Request>) -> Result<()> {
                 }
             };
 
-            let always_on_top = cx.global::<Tts>().settings.always_on_top;
             let bounds = Bounds::centered(
                 None,
                 size(px(panel::PANEL_WIDTH), px(panel::PANEL_HEIGHT)),
@@ -43,12 +42,6 @@ pub fn run(settings_path: PathBuf, initial: Option<Request>) -> Result<()> {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 is_resizable: false,
-                // On macOS a floating panel stays above other windows.
-                kind: if always_on_top && cfg!(target_os = "macos") {
-                    WindowKind::Floating
-                } else {
-                    WindowKind::Normal
-                },
                 window_decorations: Some(WindowDecorations::Client),
                 app_id: Some(crate::APP_ID.into()),
                 ..TitleBar::window_options()

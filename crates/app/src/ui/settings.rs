@@ -2,14 +2,15 @@
 
 use crate::state::{self, Tts};
 use bbtts_core::settings::{
-    Appearance, RoleStyle, Settings as TtsSettings, MAX_RATE, MIN_RATE, RATE_STEP,
+    Appearance, RoleOverride, RoleStyle, Settings as TtsSettings, MAX_RATE, MIN_RATE, RATE_STEP,
 };
-use bbtts_core::text::{AngleBrackets, InterpreterKind, UrlMode};
+use bbtts_core::text::{AngleBrackets, InterpreterKind, TableOrder, UrlMode};
 use bbtts_core::Role;
 use bbtts_platform::hotkeys::Action as Do;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
@@ -98,14 +99,6 @@ fn options<T: Copy>(
     all.iter()
         .map(|&v| (key(v).into(), label(v).into()))
         .collect()
-}
-
-fn interpreter_key(v: InterpreterKind) -> &'static str {
-    match v {
-        InterpreterKind::Auto => "auto",
-        InterpreterKind::Plain => "plain",
-        InterpreterKind::Markdown => "markdown",
-    }
 }
 
 fn angle_key(v: AngleBrackets) -> &'static str {
@@ -198,6 +191,110 @@ fn committed_input(
     })
 }
 
+/// One entry of the voice list.
+#[derive(Clone)]
+struct VoiceChoice {
+    id: SharedString,
+    label: SharedString,
+}
+
+impl SelectItem for VoiceChoice {
+    type Value = SharedString;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+}
+
+/// A voice picker with a search box: systems ship with a hundred voices or
+/// more, far too many to scroll through.
+fn voice_select(
+    key: impl Into<SharedString>,
+    default_label: &'static str,
+    value: impl Fn(&App) -> SharedString + 'static,
+    set_value: impl Fn(SharedString, &mut App) + 'static,
+) -> SettingField<SharedString> {
+    type Voices = SearchableVec<VoiceChoice>;
+    struct State {
+        select: Entity<SelectState<Voices>>,
+        /// Which list of voices the select currently holds.
+        listed: Vec<SharedString>,
+        selected: SharedString,
+        _subscription: Subscription,
+    }
+
+    let key: SharedString = key.into();
+    let set_value = std::rc::Rc::new(set_value);
+    SettingField::render(move |options, window, cx| {
+        let current = value(cx);
+        let mut choices = vec![VoiceChoice {
+            id: "".into(),
+            label: default_label.into(),
+        }];
+        choices.extend(cx.global::<Tts>().voices.iter().map(|v| VoiceChoice {
+            id: v.id.clone().into(),
+            label: v.label().into(),
+        }));
+        let ids: Vec<SharedString> = choices.iter().map(|c| c.id.clone()).collect();
+
+        let state = window.use_keyed_state(key.clone(), cx, {
+            let set_value = set_value.clone();
+            let current = current.clone();
+            move |window, cx| {
+                let select = cx.new(|cx| {
+                    SelectState::new(Voices::new(Vec::<VoiceChoice>::new()), None, window, cx)
+                        .searchable(true)
+                });
+                let _subscription = cx.subscribe(
+                    &select,
+                    move |state: &mut State, _, event: &SelectEvent<Voices>, cx| {
+                        let SelectEvent::Confirm(chosen) = event;
+                        let chosen = chosen.clone().unwrap_or_default();
+                        if chosen != state.selected {
+                            state.selected = chosen.clone();
+                            set_value(chosen, cx);
+                        }
+                    },
+                );
+                State {
+                    select,
+                    listed: Vec::new(),
+                    selected: current,
+                    _subscription,
+                }
+            }
+        });
+        // Follow the voice list (it changes with the engine and arrives a
+        // moment after start-up) and changes made elsewhere.
+        state.update(cx, |state, cx| {
+            let relisted = state.listed != ids;
+            if relisted {
+                state.listed = ids.clone();
+                state.select.update(cx, |select, cx| {
+                    select.set_items(Voices::new(choices), window, cx);
+                });
+            }
+            if relisted || state.selected != current {
+                state.selected = current.clone();
+                state.select.update(cx, |select, cx| {
+                    select.set_selected_value(&current, window, cx);
+                });
+            }
+        });
+        let select = state.read(cx).select.clone();
+        Select::new(&select)
+            .with_size(options.size())
+            .placeholder(default_label)
+            .search_placeholder("Search voices…")
+            .menu_width(px(320.))
+            .w(px(240.))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Pages
 // ---------------------------------------------------------------------------
@@ -205,22 +302,11 @@ fn committed_input(
 fn pages(cx: &App) -> Vec<SettingPage> {
     vec![
         voice_page(cx),
-        text_page(),
+        text_page(cx),
         roles_page(cx),
         shortcuts_page(cx),
         general_page(cx),
     ]
-}
-
-fn voice_options(cx: &App, default_label: &'static str) -> Vec<(SharedString, SharedString)> {
-    let mut list: Vec<(SharedString, SharedString)> = vec![("".into(), default_label.into())];
-    list.extend(
-        cx.global::<Tts>()
-            .voices
-            .iter()
-            .map(|v| (v.id.clone().into(), v.label().into())),
-    );
-    list
 }
 
 fn voice_page(cx: &App) -> SettingPage {
@@ -265,12 +351,12 @@ fn voice_page(cx: &App) -> SettingPage {
                 )
                 .item(SettingItem::new(
                     "Voice",
-                    SettingField::scrollable_dropdown(
-                        voice_options(cx, "Engine default"),
+                    voice_select(
+                        "voice-main",
+                        "Engine default",
                         get(|s| s.voice.clone().into()),
                         set(|s, v: SharedString| s.voice = v.to_string()),
-                    )
-                    .default_value(""),
+                    ),
                 ))
                 .item(
                     SettingItem::new(
@@ -320,7 +406,19 @@ fn voice_page(cx: &App) -> SettingPage {
         )
 }
 
-fn text_page() -> SettingPage {
+fn text_page(cx: &App) -> SettingPage {
+    let mut interpreters: Vec<(SharedString, SharedString)> = options(
+        &InterpreterKind::ALL,
+        InterpreterKind::key,
+        InterpreterKind::label,
+    );
+    interpreters.extend(
+        cx.global::<Tts>()
+            .settings
+            .interpreters
+            .iter()
+            .map(|p| (p.id.clone().into(), format!("{} (plugin)", p.name()).into())),
+    );
     SettingPage::new("Text")
         .icon(Icon::new(IconName::FileText))
         .group(
@@ -334,19 +432,35 @@ fn text_page() -> SettingPage {
                     SettingItem::new(
                         "Read text as",
                         SettingField::dropdown(
-                            options(&InterpreterKind::ALL, interpreter_key, InterpreterKind::label),
-                            get(|s| interpreter_key(s.interpreter).into()),
-                            set(|s, v: SharedString| {
-                                if let Some(k) = from_key(&InterpreterKind::ALL, interpreter_key, &v) {
-                                    s.interpreter = k;
-                                }
-                            }),
+                            interpreters,
+                            get(|s| s.interpreter.clone().into()),
+                            set(|s, v: SharedString| s.interpreter = v.to_string()),
                         )
                         .default_value("auto"),
                     )
                     .description(
-                        "Markdown gives headings, quotes, code and lists their own role, \
-                         which can have their own voice.",
+                        "Markdown gives headings, quotes, code, lists and tables their own \
+                         role, which can have its own voice. Plugins from the settings file \
+                         are listed here too.",
+                    ),
+                )
+                .item(
+                    SettingItem::new(
+                        "Tables",
+                        SettingField::dropdown(
+                            options(&TableOrder::ALL, TableOrder::key, TableOrder::label),
+                            get(|s| s.tables.key().into()),
+                            set(|s, v: SharedString| {
+                                if let Some(k) = from_key(&TableOrder::ALL, TableOrder::key, &v) {
+                                    s.tables = k;
+                                }
+                            }),
+                        )
+                        .default_value("columns"),
+                    )
+                    .description(
+                        "Column by column reads a column's heading, then its cells from top \
+                         to bottom, then the next column.",
                     ),
                 )
                 .item(
@@ -403,107 +517,177 @@ fn text_page() -> SettingPage {
         )
 }
 
-fn role_group(role: Role, cx: &App) -> SettingGroup {
-    let defaults = RoleStyle::default();
-    let default_pause = bbtts_core::settings::RoleStyles::default()
-        .get(role)
-        .pause_after_ms as f64;
-    SettingGroup::new()
-        .title(role.label())
-        .item(SettingItem::new(
-            "Voice",
-            SettingField::scrollable_dropdown(
-                voice_options(cx, "Same as main voice"),
-                get(move |s| s.roles.get(role).voice.clone().into()),
-                set(move |s, v: SharedString| s.roles.get_mut(role).voice = v.to_string()),
+/// A text setting of a role ("say before each", "say when a run ends", ...).
+fn role_text(
+    role: &Role,
+    name: &'static str,
+    placeholder: &'static str,
+    read: fn(&RoleStyle) -> &String,
+    write: fn(&mut RoleOverride, String),
+) -> SettingField<SharedString> {
+    let (r1, r2) = (role.clone(), role.clone());
+    committed_input(
+        format!("role-{name}-{role}"),
+        placeholder,
+        get(move |s| read(&s.roles.get(&r1)).clone().into()),
+        set(move |s, v: SharedString| write(s.roles.entry(&r2), v.to_string())),
+    )
+}
+
+fn role_group(role: Role, _cx: &App) -> SettingGroup {
+    let built_in = RoleStyle::built_in(role.root());
+    let number = |min: f64, max: f64, step: f64| NumberFieldOptions { min, max, step };
+    let mut group = SettingGroup::new().title(role.label());
+    if role.as_str() != role.root() {
+        let parent = Role::new(role.as_str().rsplit_once('.').map(|(p, _)| p).unwrap_or(""));
+        group = group.description(format!(
+            "A kind of {}: what is not set here is taken from there.",
+            parent.label().to_lowercase()
+        ));
+    }
+    let (r, w) = (role.clone(), role.clone());
+    group = group.item(SettingItem::new(
+        "Voice",
+        voice_select(
+            format!("voice-{role}"),
+            "Same as main voice",
+            get(move |s| s.roles.get(&r).voice.clone().into()),
+            set(move |s, v: SharedString| s.roles.entry(&w).voice = Some(v.to_string())),
+        ),
+    ));
+    let (r, w) = (role.clone(), role.clone());
+    group = group.item(
+        SettingItem::new(
+            "Speed",
+            SettingField::number_input(
+                number(0.5, 2.0, 0.05),
+                get(move |s| (s.roles.get(&r).rate as f64 * 100.0).round() / 100.0),
+                set(move |s, v: f64| s.roles.entry(&w).rate = Some(v as f32)),
             )
-            .default_value(""),
-        ))
-        .item(
-            SettingItem::new(
-                "Speed",
-                SettingField::number_input(
-                    NumberFieldOptions {
-                        min: 0.5,
-                        max: 2.0,
-                        step: 0.05,
-                    },
-                    get(move |s| (s.roles.get(role).rate as f64 * 100.0).round() / 100.0),
-                    set(move |s, v: f64| s.roles.get_mut(role).rate = v as f32),
-                )
-                .default_value(defaults.rate as f64),
-            )
-            .description("Relative to the main speed."),
+            .default_value(built_in.rate as f64),
         )
-        .item(
-            SettingItem::new(
-                "Pitch",
-                SettingField::number_input(
-                    NumberFieldOptions {
-                        min: 0.5,
-                        max: 2.0,
-                        step: 0.05,
-                    },
-                    get(move |s| (s.roles.get(role).pitch as f64 * 100.0).round() / 100.0),
-                    set(move |s, v: f64| s.roles.get_mut(role).pitch = v as f32),
-                )
-                .default_value(defaults.pitch as f64),
+        .description("Relative to the main speed."),
+    );
+    let (r, w) = (role.clone(), role.clone());
+    group = group.item(
+        SettingItem::new(
+            "Pitch",
+            SettingField::number_input(
+                number(0.5, 2.0, 0.05),
+                get(move |s| (s.roles.get(&r).pitch as f64 * 100.0).round() / 100.0),
+                set(move |s, v: f64| s.roles.entry(&w).pitch = Some(v as f32)),
             )
-            .description("1.0 is the voice's normal pitch. Not every engine supports it."),
+            .default_value(built_in.pitch as f64),
         )
+        .description("1.0 is the voice's normal pitch. Not every engine supports it."),
+    );
+    group = group
         .item(
             SettingItem::new(
-                "Announce with",
-                committed_input(
-                    format!("announce-{}", role.key()),
+                "Say before each",
+                role_text(
+                    &role,
+                    "announce",
                     "nothing",
-                    get(move |s| s.roles.get(role).announce.clone().into()),
-                    set(move |s, v: SharedString| s.roles.get_mut(role).announce = v.to_string()),
+                    |s| &s.announce,
+                    |o, v| o.announce = Some(v),
                 ),
             )
-            .description("Words spoken before each one, for example \"Quote\"."),
+            .description("For example \"Point\" before every list item."),
         )
         .item(SettingItem::new(
-            "Pause after (ms)",
-            SettingField::number_input(
-                NumberFieldOptions {
-                    min: 0.0,
-                    max: 5000.0,
-                    step: 20.0,
-                },
-                get(move |s| s.roles.get(role).pause_after_ms as f64),
-                set(move |s, v: f64| s.roles.get_mut(role).pause_after_ms = v.max(0.0) as u32),
-            )
-            .default_value(default_pause),
+            "Say after each",
+            role_text(
+                &role,
+                "announce-after",
+                "nothing",
+                |s| &s.announce_after,
+                |o, v| o.announce_after = Some(v),
+            ),
         ))
-        .item(SettingItem::new(
-            "Skip",
-            SettingField::switch(
-                get(move |s| s.roles.get(role).skip),
-                set(move |s, v: bool| s.roles.get_mut(role).skip = v),
+        .item(
+            SettingItem::new(
+                "Say when they start",
+                role_text(
+                    &role,
+                    "open",
+                    "nothing",
+                    |s| &s.open,
+                    |o, v| o.open = Some(v),
+                ),
             )
-            .default_value(false),
-        ))
+            .description(
+                "Once, before the first of several in a row: \"List\" before a list, \
+                 \"Table\" before a table.",
+            ),
+        )
+        .item(
+            SettingItem::new(
+                "Say when they end",
+                role_text(
+                    &role,
+                    "close",
+                    "nothing",
+                    |s| &s.close,
+                    |o, v| o.close = Some(v),
+                ),
+            )
+            .description("Once, after the last one: \"End of list\"."),
+        );
+    let (r, w) = (role.clone(), role.clone());
+    group = group.item(SettingItem::new(
+        "Pause after (ms)",
+        SettingField::number_input(
+            number(0.0, 5000.0, 20.0),
+            get(move |s| s.roles.get(&r).pause_after_ms as f64),
+            set(move |s, v: f64| s.roles.entry(&w).pause_after_ms = Some(v.max(0.0) as u32)),
+        )
+        .default_value(built_in.pause_after_ms as f64),
+    ));
+    let (r, w) = (role.clone(), role);
+    group.item(SettingItem::new(
+        "Skip",
+        SettingField::switch(
+            get(move |s| s.roles.get(&r).skip),
+            set(move |s, v: bool| s.roles.entry(&w).skip = Some(v)),
+        )
+        .default_value(false),
+    ))
 }
 
 fn roles_page(cx: &App) -> SettingPage {
+    let roles = cx.global::<Tts>().settings.roles.names();
     SettingPage::new("Voices by role")
         .icon(Icon::new(IconName::Users))
         .description(
-            "Give headings, quotes, code and list items their own voice, speed or pause. \
-             Roles come from the interpreter chosen under Text (Markdown has all of them; \
-             plain text is all paragraphs).",
+            "Give headings, quotes, code, list items and tables their own voice, speed, pause \
+             or spoken announcement. A dot makes a more specific role: \"code.python\" is \
+             code in a Python block, \"heading.1\" a top-level heading, \"table.header\" a \
+             column heading. Plugins can introduce roles of their own.",
         )
-        .groups(
-            [
-                Role::Heading,
-                Role::Paragraph,
-                Role::Quote,
-                Role::Code,
-                Role::ListItem,
-            ]
-            .map(|role| role_group(role, cx)),
+        .group(
+            SettingGroup::new().title("More roles").item(
+                SettingItem::new(
+                    "Add a role",
+                    committed_input(
+                        "add-role",
+                        "for example code.python",
+                        |_| SharedString::default(),
+                        |name: SharedString, cx: &mut App| {
+                            if !name.trim().is_empty() {
+                                state::update_settings(cx, |s| {
+                                    s.roles.entry(&Role::new(&name));
+                                });
+                            }
+                        },
+                    ),
+                )
+                .description(
+                    "Type a role name and press Enter; it appears below with its own settings.",
+                ),
+            ),
         )
+        .groups(roles.into_iter().map(|role| role_group(role, cx)))
 }
 
 fn shortcuts_page(cx: &App) -> SettingPage {
@@ -581,19 +765,19 @@ fn general_page(cx: &App) -> SettingPage {
                     .default_value("system"),
                 ))
                 .item(
-                SettingItem::new(
-                    "Keep on top",
-                    SettingField::switch(
-                        get(|s| s.always_on_top),
-                        set(|s, v: bool| s.always_on_top = v),
+                    SettingItem::new(
+                        "Keep on top",
+                        SettingField::switch(
+                            get(|s| s.always_on_top),
+                            set(|s, v: bool| s.always_on_top = v),
+                        )
+                        .default_value(true),
                     )
-                    .default_value(true),
-                )
-                .description(
-                    "Keep the controls above other windows. On macOS this applies the next time \
-                         the app starts; Wayland leaves it to the compositor.",
+                    .description(
+                        "Keep the controls above other windows, on every desktop. Wayland leaves \
+                         this to the compositor.",
+                    ),
                 ),
-            ),
         )
         .group(
             SettingGroup::new()

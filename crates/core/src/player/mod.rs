@@ -733,13 +733,10 @@ impl Worker {
                     continue;
                 }
                 let utterance = &self.playlist[i];
-                let style = self.cfg.roles.get(utterance.role);
-                let starts_block = i == 0 || self.playlist[i - 1].ends_block;
-                let text = if starts_block && !style.announce.trim().is_empty() {
-                    format!("{} {}", style.announce.trim(), utterance.spoken)
-                } else {
-                    utterance.spoken.clone()
-                };
+                let style = self.cfg.roles.get(&utterance.role);
+                // Announcements are already part of the text (see
+                // `Settings::prepare`).
+                let text = utterance.spoken.clone();
                 let params = SynthRequest {
                     text: String::new(),
                     voice: if style.voice.is_empty() {
@@ -899,7 +896,7 @@ impl Worker {
             total: self.playlist.len(),
             rate: self.rate,
             current: current.map(|u| u.display.clone()),
-            role: current.map(|u| u.role),
+            role: current.map(|u| u.role.clone()),
             title: self.title.clone(),
             error: self.error.clone(),
         };

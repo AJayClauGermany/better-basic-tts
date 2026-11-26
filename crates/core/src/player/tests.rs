@@ -69,9 +69,9 @@ fn utterances(n: usize) -> Vec<Utterance> {
     (0..n)
         .map(|i| Utterance {
             role: if i == 0 {
-                Role::Heading
+                Role::heading()
             } else {
-                Role::Paragraph
+                Role::paragraph()
             },
             spoken: format!("sentence {i}"),
             display: format!("Sentence {i}"),
@@ -82,8 +82,8 @@ fn utterances(n: usize) -> Vec<Utterance> {
 
 fn config(engine: Arc<FakeEngine>) -> PlayerConfig {
     let mut roles = RoleStyles::default();
-    for role in Role::ALL {
-        roles.get_mut(role).pause_after_ms = 0;
+    for role in roles.names() {
+        roles.entry(&role).pause_after_ms = Some(0);
     }
     PlayerConfig {
         engine: Some(engine),
@@ -304,10 +304,9 @@ fn empty_text_and_missing_engine_report_errors() {
 fn role_styles_reach_the_engine() {
     let engine = FakeEngine::new();
     let mut cfg = config(engine.clone());
-    cfg.roles.heading.voice = "narrator".into();
-    cfg.roles.heading.rate = 0.5;
-    cfg.roles.heading.announce = "Heading:".into();
-    cfg.roles.paragraph.pitch = 1.5;
+    cfg.roles.entry(&Role::heading()).voice = Some("narrator".into());
+    cfg.roles.entry(&Role::heading()).rate = Some(0.5);
+    cfg.roles.entry(&Role::paragraph()).pitch = Some(1.5);
     let p = Player::new(
         || Box::new(SilentOutput::with_speed(50.0)),
         cfg,
@@ -318,7 +317,7 @@ fn role_styles_reach_the_engine() {
     wait_for(&p, "finished", |s| s.status == Status::Idle && s.total == 3);
     let log = engine.log.lock().unwrap();
     let heading = log.iter().find(|r| r.text.contains("sentence 0")).unwrap();
-    assert_eq!(heading.text, "Heading: sentence 0");
+    assert_eq!(heading.text, "sentence 0");
     assert_eq!(heading.voice.as_deref(), Some("narrator"));
     assert!((heading.rate - 1.0).abs() < 1e-4);
     let para = log.iter().find(|r| r.text == "sentence 1").unwrap();
@@ -622,7 +621,7 @@ fn a_voice_with_another_sample_rate_starts_its_own_stream() {
     let output = seen.clone();
     let mut cfg = config(FakeEngine::new());
     cfg.engine = Some(Arc::new(TwoRates));
-    cfg.roles.heading.voice = "narrator".into();
+    cfg.roles.entry(&Role::heading()).voice = Some("narrator".into());
     let p = Player::new(move || output.output(10.0), cfg, 1.0, |_| {});
     // Sentence 0 is a heading (narrator), 1 and 2 are paragraphs.
     p.speak(utterances(3), "");
@@ -688,7 +687,7 @@ fn look_ahead_is_batched_for_engines_that_want_it() {
     let p = Player::new(move || output.output(4.0), cfg, 1.0, |_| {});
     // All paragraphs, so the voice parameters never force a batch to end.
     let mut text = utterances(14);
-    text[0].role = Role::Paragraph;
+    text[0].role = Role::paragraph();
     p.speak(text, "");
     wait_for(&p, "the end", |s| {
         s.status == Status::Idle && s.total == 14 && seen.order().len() == 14
@@ -718,7 +717,7 @@ fn a_batch_stops_where_the_voice_changes() {
     });
     let mut cfg = config(FakeEngine::new());
     cfg.engine = Some(engine.clone());
-    cfg.roles.quote.voice = "other".into();
+    cfg.roles.entry(&Role::quote()).voice = Some("other".into());
     let p = Player::new(
         || Box::new(SilentOutput::with_speed(20.0)),
         cfg,
@@ -727,9 +726,9 @@ fn a_batch_stops_where_the_voice_changes() {
     );
     let mut text = utterances(8);
     for u in &mut text {
-        u.role = Role::Paragraph;
+        u.role = Role::paragraph();
     }
-    text[4].role = Role::Quote;
+    text[4].role = Role::quote();
     p.speak(text, "");
     wait_for(&p, "done", |s| {
         s.status == Status::Idle && s.total == 8 && s.index == 0

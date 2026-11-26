@@ -5,7 +5,7 @@
 //!
 //! * Windows — `SetWindowPos(HWND_TOPMOST)`
 //! * X11 — the `_NET_WM_STATE_ABOVE` window manager hint
-//! * macOS — handled by the toolkit (a floating panel), nothing to do here
+//! * macOS — the window's level and Spaces behaviour, set on the `NSWindow`
 //! * Wayland — no protocol exists; use the compositor's own "keep above"
 
 use anyhow::Result;
@@ -30,9 +30,60 @@ pub fn set_always_on_top(window: RawWindowHandle, on_top: bool) -> Result<bool> 
             x11::set_above(handle.window as u32, on_top)?;
             Ok(true)
         }
+        #[cfg(target_os = "macos")]
+        RawWindowHandle::AppKit(handle) => {
+            macos::set_floating(handle.ns_view.as_ptr(), on_top);
+            Ok(true)
+        }
         _ => {
             let _ = on_top;
             Ok(false)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use std::ffi::c_void;
+
+    /// `NSFloatingWindowLevel`: above the normal windows of every app.
+    const FLOATING_LEVEL: isize = 3;
+    const NORMAL_LEVEL: isize = 0;
+    /// `NSWindowCollectionBehaviorCanJoinAllSpaces`: follow the user from
+    /// Space to Space instead of staying behind on the one it was opened on.
+    const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+    /// `NSWindowCollectionBehaviorFullScreenAuxiliary`: may sit on top of
+    /// another app's full-screen window.
+    const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+
+    /// Must be called on the main thread, with a live `NSView`.
+    pub fn set_floating(ns_view: *mut c_void, on_top: bool) {
+        // SAFETY: the pointer comes from the toolkit's window handle for a
+        // window that is alive for the duration of this call, and we are on
+        // the main thread (the toolkit only hands out handles there). The
+        // selectors and argument types are those of NSView / NSWindow.
+        unsafe {
+            let view = ns_view as *mut AnyObject;
+            if view.is_null() {
+                return;
+            }
+            let window: *mut AnyObject = msg_send![view, window];
+            if window.is_null() {
+                return;
+            }
+            let level = if on_top { FLOATING_LEVEL } else { NORMAL_LEVEL };
+            let _: () = msg_send![window, setLevel: level];
+            // A window that hides when another app comes forward would
+            // defeat the purpose.
+            let _: () = msg_send![window, setHidesOnDeactivate: false];
+            let behavior = if on_top {
+                CAN_JOIN_ALL_SPACES | FULL_SCREEN_AUXILIARY
+            } else {
+                0
+            };
+            let _: () = msg_send![window, setCollectionBehavior: behavior];
         }
     }
 }

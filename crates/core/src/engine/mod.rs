@@ -13,6 +13,8 @@
 //! | `espeak`  | any (Linux default) | `espeak-ng` if installed                   |
 //! | custom    | any             | any local command that produces a WAV file (Piper, KittenTTS, NeuTTS, ...) |
 
+#[cfg(all(test, target_os = "macos"))]
+mod av_probe;
 mod command;
 mod espeak;
 mod say;

@@ -54,6 +54,12 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Probe the native macOS speech API
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 6
+        run: cargo test -p bbtts-core av_probe -- --ignored --nocapture
+
       - name: Lint
         if: runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets -- -D warnings

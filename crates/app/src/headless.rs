@@ -76,7 +76,7 @@ pub fn list_voices(settings: &Settings) -> Result<()> {
 pub fn explain(settings: &Settings, text: &str) {
     let mut out = String::new();
     for (i, u) in settings.prepare(text).iter().enumerate() {
-        let _ = writeln!(out, "{:>3} [{}] {}", i + 1, u.role.key(), u.display);
+        let _ = writeln!(out, "{:>3} [{}] {}", i + 1, u.role, u.display);
         if u.spoken != u.display {
             let _ = writeln!(out, "      spoken as: {}", u.spoken);
         }
@@ -93,13 +93,8 @@ pub fn render_to_file(settings: &Settings, text: &str, path: &Path) -> Result<()
     }
     let mut out: Option<Audio> = None;
     for (i, u) in utterances.iter().enumerate() {
-        let style = settings.roles.get(u.role);
-        let starts_block = i == 0 || utterances[i - 1].ends_block;
-        let text = if starts_block && !style.announce.trim().is_empty() {
-            format!("{} {}", style.announce.trim(), u.spoken)
-        } else {
-            u.spoken.clone()
-        };
+        let style = settings.roles.get(&u.role);
+        let text = u.spoken.clone();
         let mut audio = engine
             .synthesize(&SynthRequest {
                 text,
@@ -215,7 +210,7 @@ pub fn benchmark(settings: &Settings, text: &str) -> Result<()> {
         bail!("there is no text to read");
     }
     let request = |u: &bbtts_core::Utterance| {
-        let style = settings.roles.get(u.role);
+        let style = settings.roles.get(&u.role);
         SynthRequest {
             text: u.spoken.clone(),
             voice: if !style.voice.is_empty() {

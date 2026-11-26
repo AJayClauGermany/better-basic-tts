@@ -24,6 +24,9 @@ pub enum Event {
     /// The selection can only be read by simulating a copy, which has to be
     /// triggered from the UI thread.
     NeedsCopy(CopyRequest),
+    /// Text has been turned into sentences (possibly by a plugin) and can
+    /// be read. The string is the title to show.
+    Prepared(bbtts_core::text::Prepared, String),
     /// The voices of an engine were listed (engine id, voices).
     Voices(String, Vec<Voice>),
 }
@@ -37,6 +40,9 @@ pub struct Tts {
     pub voices: Vec<Voice>,
     /// A short message for the panel ("No text is selected.").
     pub notice: Option<String>,
+    /// Something about the text being read that the user should know, such
+    /// as a plugin that failed. Stays until the next text.
+    pub warning: Option<String>,
     /// Problems found at start-up or when applying settings.
     pub settings_problem: Option<String>,
     pub hotkey_problems: Vec<String>,
@@ -161,6 +167,7 @@ pub fn init(settings_path: PathBuf, cx: &mut App) {
         player,
         voices: Vec::new(),
         notice: None,
+        warning: None,
         settings_problem,
         hotkey_problems: Vec::new(),
         audio_problem,
@@ -222,6 +229,15 @@ fn handle_event(event: Event, cx: &mut App) {
                 Request::Faster => perform(Action::Faster, cx),
             }
             return;
+        }
+        Event::Prepared(prepared, title) => {
+            let tts = cx.global_mut::<Tts>();
+            tts.warning = prepared.warning;
+            if prepared.utterances.is_empty() {
+                tts.notice = Some("There is no text to read.".into());
+            } else {
+                tts.player.speak(prepared.utterances, title);
+            }
         }
         Event::Voices(engine_id, voices) => {
             let tts = cx.global_mut::<Tts>();
@@ -313,15 +329,20 @@ fn capture(tts: &mut Tts, f: impl FnOnce() -> anyhow::Result<Captured> + Send + 
 }
 
 /// Interpret `text` with the current settings and start reading it.
+///
+/// Interpreting happens off the UI thread: a plugin is a separate program
+/// and may take a moment.
 pub fn speak_text(text: &str, title: &str, cx: &mut App) {
     let tts = cx.global_mut::<Tts>();
-    let utterances = tts.settings.prepare(text);
-    if utterances.is_empty() {
-        tts.notice = Some("There is no text to read.".into());
-    } else {
-        tts.notice = None;
-        tts.player.speak(utterances, title);
-    }
+    tts.notice = None;
+    tts.warning = None;
+    let settings = tts.settings.clone();
+    let events = tts.events.clone();
+    let (text, title) = (text.to_string(), title.to_string());
+    std::thread::spawn(move || {
+        let prepared = settings.prepare_report(&text);
+        let _ = events.send(Event::Prepared(prepared, title));
+    });
     cx.refresh_windows();
 }
 
@@ -345,11 +366,9 @@ pub fn apply_appearance(cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Keep the control panel above other windows, or stop doing so.
-///
-/// Windows and X11 are handled here; on macOS the panel is created as a
-/// floating panel (so a change applies at the next start), and Wayland has
-/// no way for an application to ask for this.
+/// Keep the control panel above other windows (and, on macOS, on every
+/// Space), or stop doing so. Wayland has no way for an application to ask
+/// for this.
 pub fn apply_always_on_top(cx: &mut App) {
     let tts = cx.global::<Tts>();
     let on_top = tts.settings.always_on_top;
@@ -380,9 +399,7 @@ pub fn update_settings(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     if tts.settings.engine != before.engine {
         // Voice ids from another engine mean nothing to the new one.
         tts.settings.voice.clear();
-        for role in bbtts_core::Role::ALL {
-            tts.settings.roles.get_mut(role).voice.clear();
-        }
+        tts.settings.roles.clear_voices();
         tts.reload_voices();
     }
     if tts.settings.shortcuts != before.shortcuts {

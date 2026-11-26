@@ -72,6 +72,12 @@ impl Panel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        // Window systems can drop "keep on top" when a window changes
+        // state; ask again whenever ours becomes active or inactive.
+        cx.observe_window_activation(window, |_, _, cx| {
+            cx.defer(state::apply_always_on_top);
+        })
+        .detach();
         Self { focus }
     }
 }
@@ -141,6 +147,7 @@ impl Render for Panel {
             .error
             .clone()
             .or_else(|| tts.notice.clone())
+            .or_else(|| tts.warning.clone())
             .or_else(|| tts.settings_problem.clone())
             .or_else(|| tts.audio_problem.clone());
         let (status_text, status_is_problem): (SharedString, bool) = match (&problem, &snap.current)

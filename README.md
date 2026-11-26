@@ -18,8 +18,11 @@ nothing else you have to learn.
   silently dropped. `Vec<String>` is read as "Vec of String", `a < b` as "a less
   than b", `<script>` as "script tag".
 - **Global shortcut.** Select text anywhere, press a key, hear it.
-- **Customisable when you want it.** Markdown headings, quotes, code and list items
-  can each have their own voice, speed, pitch, pause or spoken announcement.
+- **Customisable when you want it.** Headings, quotes, code (per language), list items
+  and tables can each have their own voice, speed, pitch, pause or spoken
+  announcement; tables can be read column by column; and small
+  [plugins](contrib/interpreters/README.md) can change how any text is interpreted
+  without recompiling.
 
 Written in Rust with [GPUI](https://www.gpui.rs/) and [GPUI Kit](https://gpui-kit.com).
 
@@ -167,23 +170,39 @@ Everything lives in one TOML file, and most of it is editable in the settings wi
 appearance = "system"      # system | light | dark
 engine = "auto"            # or "say", "winrt", "espeak", or one of yours
 voice = ""                 # empty = the engine's default voice
-rate = 1.2
-interpreter = "auto"       # auto | plain | markdown
+rate = 1.25
+interpreter = "auto"       # auto | plain | markdown | the id of a plugin
+tables = "columns"         # columns | rows
 angle_brackets = "smart"   # smart | literal | strip_tags | silent
 urls = "domain"            # domain | full | skip
 
-# One voice for headings, another for quotes, skip code blocks.
+# One voice for headings, a longer pause after top-level ones.
 [roles.heading]
 voice = "Daniel"
 rate = 0.9
-pause_after_ms = 600
 
-[roles.quote]
-voice = "Samantha"
-announce = "Quote."
+[roles."heading.1"]
+pause_after_ms = 700
 
+# "List. Point. Milk. Point. Eggs. End of list."
+[roles.list_item]
+open = "List"
+announce = "Point"
+close = "End of list"
+
+# Python code slower than other code; never read shell snippets.
 [roles.code]
+voice = "Fred"
+
+[roles."code.python"]
+rate = 0.85
+
+[roles."code.sh"]
 skip = true
+
+# Column headings stand out from the cells.
+[roles."table.header"]
+pitch = 1.15
 
 # Pronunciation fixes, applied before anything else.
 [[substitutions]]
@@ -198,6 +217,47 @@ regex = true
 roles = ["heading"]
 ```
 
+### Roles
+
+Every piece of text has a *role*. Roles are names; a dot makes a more specific kind,
+and whatever is not set for the specific role is taken from the general one
+(`code.python` → `code`). The Markdown interpreter produces `heading.1`–`heading.6`,
+`paragraph`, `quote`, `list_item`, `code` / `code.<language>`, and `table.header` with
+`table.cell` (or `table.row`). Each role can set:
+
+| Setting | Meaning |
+|---------|---------|
+| `voice`, `rate`, `pitch`, `volume` | how it sounds, relative to the main voice |
+| `announce`, `announce_after` | words spoken before / after **each** block |
+| `open`, `close` | words spoken once before / after a **run** of them (a whole list, a whole table) |
+| `pause_after_ms` | silence after each block |
+| `skip` | do not read it |
+
+All of it is under **Settings → Voices by role**, where you can also add roles.
+
+### Tables
+
+By default a table is read **column by column**: a column's heading, then its cells
+from top to bottom, then the next column to the right. Each cell is its own sentence,
+so ⏪ / ⏩ step through cells. `tables = "rows"` reads row by row instead.
+
+### Plugins
+
+When settings are not enough, a plugin can rewrite how text is split into roles — a
+few lines of Python (or anything else) that receive the blocks as JSON and return
+them changed. No recompiling; see [`contrib/interpreters`](contrib/interpreters/README.md)
+for the protocol and a commented example.
+
+```toml
+interpreter = "example"
+
+[[interpreters]]
+id = "example"
+program = "python3"
+args = ["/path/to/contrib/interpreters/example_plugin.py"]
+base = "markdown"
+```
+
 ### How it works
 
 ```
@@ -206,13 +266,12 @@ raw text → sanitize → interpreter → [block: role + text] → sentences →
 
 1. **Sanitize** — control characters, escape sequences and invisible / bidi
    characters are removed.
-2. **Interpreter** — assigns a *role* (heading, paragraph, quote, code, list item) to
-   each block. Plain text and Markdown are built in; this is the extension point for
-   new formats (`crates/core/src/text/interpret.rs`).
+2. **Interpreter** — assigns a *role* to each block. Plain text and Markdown are built
+   in; a plugin can post-process or replace them.
 3. **Speakable** — URLs, your substitutions, then angle brackets. After this step the
    text sent to an engine contains no `<` or `>` at all, so no engine can mistake it
    for SSML or HTML.
-4. **Role styles** — pick voice, rate, pitch, volume, announcement and pauses.
+4. **Role styles** — pick voice, rate, pitch, volume, announcements and pauses.
 5. **Engine** — one sentence in, PCM out. Sentences are prepared ahead of the one being
    read, and each is handed to the audio stream before the previous one ends, so they
    follow each other without a seam. Engines with a high start-up cost per call (macOS
@@ -262,7 +321,6 @@ cargo test --workspace
   while it is running (minimise it instead).
 - **Wayland:** no global shortcuts (use the CLI commands above) and no
   always-on-top (use the compositor's "keep above").
-- **macOS "keep on top"** changes apply at the next start.
 - The simulated copy on macOS / Windows restores *text* clipboard contents; a copied
   image or file would be replaced by the selection.
 - Navigation is by sentence; there is no word highlighting.
