@@ -68,11 +68,22 @@ jobs:
           ./target/release/better-basic-tts engines || true
           ./target/release/better-basic-tts explain 'Use Vec<String> when a < b.'
 
+      - name: Write a fast-reading config
+        shell: bash
+        run: echo 'rate = 2.5' > fast.toml
+
       - name: Smoke test (speak to a file)
         shell: bash
         run: |
           ./target/release/better-basic-tts speak --output hello.wav 'Hello from Better Basic TTS. This is the second sentence.'
           ls -l hello.wav
+
+      - name: Engine speed
+        shell: bash
+        run: |
+          ./target/release/better-basic-tts benchmark
+          # Again at a speed-listener's rate.
+          ./target/release/better-basic-tts --config fast.toml benchmark
 
       - name: Bundle macOS app
         if: runner.os == 'macOS'

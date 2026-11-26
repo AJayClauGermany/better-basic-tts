@@ -77,7 +77,13 @@ impl Panel {
 }
 
 fn format_rate(rate: f32) -> String {
-    format!("{rate:.1}×")
+    // "1.25×", "1.5×", "2.0×"
+    let hundredths = (rate * 100.0).round() as i32;
+    if hundredths % 10 == 0 {
+        format!("{:.1}×", hundredths as f32 / 100.0)
+    } else {
+        format!("{:.2}×", hundredths as f32 / 100.0)
+    }
 }
 
 /// One of the six big buttons.

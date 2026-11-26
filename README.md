@@ -41,7 +41,7 @@ Start `better-basic-tts`. A small panel appears.
 
 | Button | Does | Key (panel focused) |
 |--------|------|---------------------|
-| 🐢 | slower (0.1× steps, applies immediately, mid-sentence) | `↓` or `-` |
+| 🐢 | slower (0.25× steps, applies immediately, mid-sentence) | `↓` or `-` |
 | ⏪ | restart the sentence; press again to go to the previous one | `←` |
 | ⏯ | pause / resume. With nothing loaded: read the clipboard | `Space` |
 | ⏹ | stop | `Esc` |
@@ -98,7 +98,12 @@ better-basic-tts pause | stop | previous | next | slower | faster | show
 better-basic-tts engines             speech engines found on this computer
 better-basic-tts voices              voices of the active engine
 better-basic-tts explain "text"      show how text is split and what is spoken
+better-basic-tts benchmark           how fast the engine is compared to playback
 ```
+
+If reading ever pauses between sentences, `benchmark` shows whether the speech engine
+is the reason (it compares how long each sentence takes to produce with how long it
+takes to play, at your current speed and voice).
 
 `explain` is handy for checking interpretation rules:
 
@@ -208,7 +213,9 @@ raw text → sanitize → interpreter → [block: role + text] → sentences →
    text sent to an engine contains no `<` or `>` at all, so no engine can mistake it
    for SSML or HTML.
 4. **Role styles** — pick voice, rate, pitch, volume, announcement and pauses.
-5. **Engine** — one sentence in, PCM out. The next two sentences are prepared ahead.
+5. **Engine** — one sentence in, PCM out. Up to six sentences are prepared ahead, and
+   each one is handed to the audio stream before the previous one ends, so sentences
+   follow each other without a seam.
 6. **Player** — owns the transport.
 
 ## Building

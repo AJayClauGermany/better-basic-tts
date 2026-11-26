@@ -281,7 +281,7 @@ fn voice_page(cx: &App) -> SettingPage {
                                 max: MAX_RATE as f64,
                                 step: RATE_STEP as f64,
                             },
-                            get(|s| (s.rate as f64 * 10.0).round() / 10.0),
+                            get(|s| (s.rate as f64 * 100.0).round() / 100.0),
                             set(|s, v: f64| s.rate = v as f32),
                         )
                         .default_value(1.0),

@@ -206,8 +206,8 @@ fn rate_changes_apply_immediately_and_clamp() {
     wait_for(&p, "playing", |s| s.status == Status::Playing);
     p.faster();
     p.faster();
-    let snap = wait_for(&p, "rate 1.2", |s| {
-        (s.rate - 1.2).abs() < 1e-4 && s.status == Status::Playing
+    let snap = wait_for(&p, "rate 1.5", |s| {
+        (s.rate - 1.5).abs() < 1e-4 && s.status == Status::Playing
     });
     assert_eq!(snap.index, 0, "speed change must not skip sentences");
     assert!(engine
@@ -215,7 +215,7 @@ fn rate_changes_apply_immediately_and_clamp() {
         .lock()
         .unwrap()
         .iter()
-        .any(|r| r.text == "sentence 0" && (r.rate - 1.2).abs() < 1e-4));
+        .any(|r| r.text == "sentence 0" && (r.rate - 1.5).abs() < 1e-4));
     for _ in 0..100 {
         p.slower();
     }
@@ -228,7 +228,7 @@ fn rate_changes_apply_immediately_and_clamp() {
 fn rate_can_change_while_idle() {
     let p = player(FakeEngine::new(), 1.0);
     p.faster();
-    let snap = wait_for(&p, "rate 1.1", |s| (s.rate - 1.1).abs() < 1e-4);
+    let snap = wait_for(&p, "rate 1.25", |s| (s.rate - 1.25).abs() < 1e-4);
     assert_eq!(snap.status, Status::Idle);
 }
 
@@ -380,11 +380,227 @@ fn slow_engine_keeps_playing_while_new_speed_is_prepared() {
             .lock()
             .unwrap()
             .iter()
-            .any(|r| r.text == "sentence 0" && (r.rate - 1.1).abs() < 1e-4);
+            .any(|r| r.text == "sentence 0" && (r.rate - 1.25).abs() < 1e-4);
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(switched, "the faster version was never requested");
     // Skipping, in contrast, interrupts immediately.
     p.next();
     wait_for(&p, "loading next", |s| s.index == 1);
+}
+
+/// Counts how sentences reach the output: started afresh (`play`) or handed
+/// over inside the running stream (`queue_next`).
+struct CountingOutput {
+    inner: SilentOutput,
+    plays: Arc<AtomicUsize>,
+    handovers: Arc<AtomicUsize>,
+}
+
+impl AudioOutput for CountingOutput {
+    fn play(&mut self, audio: Arc<Audio>, start: usize) -> anyhow::Result<()> {
+        self.plays.fetch_add(1, Ordering::SeqCst);
+        self.inner.play(audio, start)
+    }
+    fn queue_next(&mut self, audio: Arc<Audio>) -> bool {
+        self.inner.queue_next(audio)
+    }
+    fn clear_next(&mut self) -> bool {
+        self.inner.clear_next()
+    }
+    fn advanced(&mut self) -> bool {
+        let advanced = self.inner.advanced();
+        if advanced {
+            self.handovers.fetch_add(1, Ordering::SeqCst);
+        }
+        advanced
+    }
+    fn pause(&mut self) {
+        self.inner.pause()
+    }
+    fn resume(&mut self) {
+        self.inner.resume()
+    }
+    fn stop(&mut self) {
+        self.inner.stop()
+    }
+    fn position(&self) -> usize {
+        self.inner.position()
+    }
+    fn finished(&self) -> bool {
+        self.inner.finished()
+    }
+}
+
+fn counting_player(
+    engine: Arc<FakeEngine>,
+    speed: f64,
+    rate: f32,
+) -> (Player, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let plays = Arc::new(AtomicUsize::new(0));
+    let handovers = Arc::new(AtomicUsize::new(0));
+    let (p, h) = (plays.clone(), handovers.clone());
+    let player = Player::new(
+        move || {
+            Box::new(CountingOutput {
+                inner: SilentOutput::with_speed(speed),
+                plays: p,
+                handovers: h,
+            })
+        },
+        config(engine),
+        rate,
+        || {},
+    );
+    (player, plays, handovers)
+}
+
+#[test]
+fn sentences_hand_over_inside_the_stream() {
+    let (p, plays, handovers) = counting_player(FakeEngine::new(), 8.0, 1.0);
+    p.speak(utterances(5), "");
+    let mut seen = Vec::new();
+    let start = Instant::now();
+    loop {
+        let snap = p.snapshot();
+        if snap.status == Status::Idle && !seen.is_empty() {
+            break;
+        }
+        if snap.status == Status::Playing && seen.last() != Some(&snap.index) {
+            seen.push(snap.index);
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "stuck: {snap:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        seen,
+        vec![0, 1, 2, 3, 4],
+        "every sentence is visited in order"
+    );
+    // Only the very first sentence starts a stream; the rest follow in it.
+    assert_eq!(plays.load(Ordering::SeqCst), 1);
+    assert_eq!(handovers.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn no_stalls_when_the_engine_is_slow_but_keeps_up() {
+    // Each sentence takes 300 ms to synthesise and lasts 400 ms at 2.5x.
+    let engine = Arc::new(FakeEngine {
+        calls: AtomicUsize::new(0),
+        log: Mutex::new(Vec::new()),
+        fail_on: None,
+        delay: Duration::from_millis(300),
+    });
+    let (p, _, _) = counting_player(engine, 1.0, 2.5);
+    let n = 8;
+    p.speak(utterances(n), "");
+    wait_for(&p, "first sentence", |s| s.status == Status::Playing);
+    let started = Instant::now();
+    let mut waiting = Duration::ZERO;
+    let mut last = Instant::now();
+    loop {
+        let snap = p.snapshot();
+        let now = Instant::now();
+        if snap.status == Status::Loading {
+            waiting += now - last;
+        }
+        last = now;
+        if snap.status == Status::Idle {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "stuck: {snap:?}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        waiting < Duration::from_millis(60),
+        "reading stalled for {waiting:?} between sentences"
+    );
+    let audio = Duration::from_secs_f32(n as f32 / 2.5);
+    assert!(
+        started.elapsed() < audio + Duration::from_millis(250),
+        "took {:?} for {audio:?} of audio",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn skipping_takes_back_the_lined_up_sentence() {
+    let (p, plays, _) = counting_player(FakeEngine::new(), 0.2, 1.0);
+    p.speak(utterances(5), "");
+    wait_for(&p, "playing", |s| s.status == Status::Playing);
+    // Give the player time to line up sentence 1 behind sentence 0.
+    std::thread::sleep(Duration::from_millis(80));
+    p.next();
+    p.next();
+    wait_for(&p, "sentence 2", |s| {
+        s.index == 2 && s.status == Status::Playing
+    });
+    p.previous();
+    wait_for(&p, "sentence 1", |s| {
+        s.index == 1 && s.status == Status::Playing
+    });
+    // Each jump starts the stream afresh at the right sentence.
+    assert_eq!(plays.load(Ordering::SeqCst), 4);
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        p.snapshot().index,
+        1,
+        "a stale lined-up sentence must not take over"
+    );
+}
+
+#[test]
+fn a_voice_with_another_sample_rate_starts_its_own_stream() {
+    struct TwoRates;
+    impl Engine for TwoRates {
+        fn id(&self) -> &str {
+            "two"
+        }
+        fn name(&self) -> &str {
+            "Two"
+        }
+        fn voices(&self) -> anyhow::Result<Vec<Voice>> {
+            Ok(vec![])
+        }
+        fn synthesize(&self, req: &SynthRequest) -> anyhow::Result<Audio> {
+            // The heading voice has a different sample rate.
+            let rate = if req.voice.as_deref() == Some("narrator") {
+                2000
+            } else {
+                1000
+            };
+            Ok(Audio {
+                sample_rate: rate,
+                samples: vec![0.5; rate as usize],
+            })
+        }
+    }
+    let plays = Arc::new(AtomicUsize::new(0));
+    let handovers = Arc::new(AtomicUsize::new(0));
+    let (pc, hc) = (plays.clone(), handovers.clone());
+    let mut cfg = config(FakeEngine::new());
+    cfg.engine = Some(Arc::new(TwoRates));
+    cfg.roles.heading.voice = "narrator".into();
+    let p = Player::new(
+        move || {
+            Box::new(CountingOutput {
+                inner: SilentOutput::with_speed(10.0),
+                plays: pc,
+                handovers: hc,
+            })
+        },
+        cfg,
+        1.0,
+        || {},
+    );
+    // Sentence 0 is a heading (narrator), 1 and 2 are paragraphs.
+    p.speak(utterances(3), "");
+    wait_for(&p, "done", |s| {
+        s.status == Status::Idle && s.total == 3 && s.index == 0
+    });
+    wait_for(&p, "all played", |_| plays.load(Ordering::SeqCst) == 2);
+    assert_eq!(handovers.load(Ordering::SeqCst), 1);
 }

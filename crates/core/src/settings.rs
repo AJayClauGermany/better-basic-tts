@@ -34,7 +34,10 @@ impl Appearance {
 
 pub const MIN_RATE: f32 = 0.5;
 pub const MAX_RATE: f32 = 4.0;
-pub const RATE_STEP: f32 = 0.1;
+/// What one press of the turtle or the rabbit changes.
+pub const RATE_STEP: f32 = 0.25;
+/// Speeds are kept to this precision.
+const RATE_PRECISION: f32 = 0.05;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -214,8 +217,8 @@ pub fn clamp_rate(rate: f32) -> f32 {
     if !rate.is_finite() {
         return 1.0;
     }
-    // Snap to the step grid so repeated clicks do not accumulate float error.
-    let snapped = (rate / RATE_STEP).round() / (1.0 / RATE_STEP).round();
+    // Snap to a fine grid so repeated changes do not accumulate float error.
+    let snapped = (rate / RATE_PRECISION).round() / (1.0 / RATE_PRECISION).round();
     snapped.clamp(MIN_RATE, MAX_RATE)
 }
 

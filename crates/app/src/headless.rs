@@ -195,3 +195,120 @@ pub fn speak_and_wait(settings: &Settings, text: &str) -> Result<()> {
         }
     }
 }
+
+/// Text for `benchmark` when none is given: sentences of mixed length.
+pub const BENCHMARK_SAMPLE: &str = "\
+The quick brown fox jumps over the lazy dog. It does so every morning. \
+Nobody knows why, although several theories have been put forward over the years, \
+none of them entirely convincing. Short one. \
+Reading aloud works best when one sentence follows the next without a noticeable gap. \
+That is what this measures. If the engine needs longer to produce a sentence than the \
+sentence takes to play, the listener hears a pause. Otherwise they should not.";
+
+/// Time the speech engine against playback, sentence by sentence.
+pub fn benchmark(settings: &Settings, text: &str) -> Result<()> {
+    use std::time::Instant;
+
+    let engine = engine_for(settings)?;
+    let utterances: Vec<_> = settings.prepare(text).into_iter().take(12).collect();
+    if utterances.is_empty() {
+        bail!("there is no text to read");
+    }
+    let request = |u: &bbtts_core::Utterance| {
+        let style = settings.roles.get(u.role);
+        SynthRequest {
+            text: u.spoken.clone(),
+            voice: if !style.voice.is_empty() {
+                Some(style.voice.clone())
+            } else if !settings.voice.is_empty() {
+                Some(settings.voice.clone())
+            } else {
+                None
+            },
+            rate: settings.rate * style.rate,
+            pitch: style.pitch,
+            volume: settings.volume,
+        }
+    };
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Engine: {}   voice: {}   speed: {}x\n",
+        engine.name(),
+        if settings.voice.is_empty() {
+            "(default)"
+        } else {
+            &settings.voice
+        },
+        settings.rate
+    );
+    let _ = writeln!(
+        out,
+        "{:>3}  {:>9}  {:>8}  {:>7}  text",
+        "#", "synthesis", "playback", "ratio"
+    );
+    print_all(&out);
+
+    // One at a time. The first call may include loading the voice.
+    let (mut synth_total, mut audio_total, mut slowest) = (0.0f64, 0.0f64, f64::MAX);
+    for (i, u) in utterances.iter().enumerate() {
+        let started = Instant::now();
+        let audio = engine
+            .synthesize(&request(u))
+            .with_context(|| format!("could not synthesize sentence {}", i + 1))?;
+        let synth = started.elapsed().as_secs_f64();
+        let playback = audio.duration_secs();
+        let ratio = playback / synth.max(1e-6);
+        synth_total += synth;
+        audio_total += playback;
+        // The first sentence is start-up, not steady state.
+        if i > 0 {
+            slowest = slowest.min(ratio);
+        }
+        let preview: String = u.display.chars().take(40).collect();
+        print_all(&format!(
+            "{:>3}  {:>7.0}ms  {:>6.0}ms  {:>6.1}x  {}\n",
+            i + 1,
+            synth * 1000.0,
+            playback * 1000.0,
+            ratio,
+            preview
+        ));
+    }
+
+    // Three at a time, the way the player prepares sentences ahead.
+    let started = Instant::now();
+    let queue = std::sync::Mutex::new(utterances.iter());
+    std::thread::scope(|scope| {
+        for _ in 0..3 {
+            scope.spawn(|| loop {
+                let next = queue.lock().unwrap().next();
+                let Some(u) = next else { break };
+                let _ = engine.synthesize(&request(u));
+            });
+        }
+    });
+    let parallel = audio_total / started.elapsed().as_secs_f64().max(1e-6);
+    let sequential = audio_total / synth_total.max(1e-6);
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "\nOne sentence at a time: {sequential:.1}x faster than playback."
+    );
+    let _ = writeln!(
+        out,
+        "Three at a time:        {parallel:.1}x faster than playback."
+    );
+    let verdict = if parallel >= 2.0 && (slowest >= 1.0 || utterances.len() < 2) {
+        "The engine keeps up comfortably; reading should not pause between sentences."
+    } else if parallel >= 1.0 {
+        "The engine barely keeps up at this speed; short sentences in a row may cause pauses."
+    } else {
+        "The engine is slower than playback at this speed; reading will pause between sentences."
+    };
+    let _ = writeln!(out, "{verdict}");
+    print_all(&out);
+    Ok(())
+}

@@ -16,8 +16,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// How many sentences are synthesised ahead of the one being played.
-const PREFETCH: usize = 2;
+/// How many sentences are synthesised ahead of the one being played. Deep
+/// enough that a few short sentences in a row, or an engine that is only a
+/// little faster than real time, do not make the reading stall.
+const PREFETCH: usize = 6;
+/// Synthesis threads. More than one lets the sentence that is needed *now*
+/// overtake look-ahead work that is already running.
+const SYNTH_THREADS: usize = 3;
 /// "Previous" restarts the current sentence when more than this much of it
 /// has been heard, and goes to the one before otherwise.
 const RESTART_THRESHOLD_SECS: f64 = 1.5;
@@ -158,7 +163,7 @@ impl Player {
             ..Default::default()
         }));
         let jobs = Arc::new(JobQueue::default());
-        for n in 0..2 {
+        for n in 0..SYNTH_THREADS {
             let jobs = jobs.clone();
             let tx = tx.clone();
             std::thread::Builder::new()
@@ -183,6 +188,7 @@ impl Player {
                         paused: false,
                         rate: clamp_rate(rate),
                         loaded: None,
+                        queued: None,
                         resume_fraction: 0.0,
                         cache: HashMap::new(),
                         generation: 0,
@@ -374,6 +380,9 @@ struct Worker {
     /// was made for. After a speed or voice change this can be audio for the
     /// *old* settings that keeps playing until the new audio is ready.
     loaded: Option<(u64, Key, Arc<Audio>)>,
+    /// The next sentence, already lined up in the output so that it follows
+    /// the current one without a seam.
+    queued: Option<(u64, Key, Arc<Audio>)>,
     /// Where in the current sentence to start once its audio is ready
     /// (0.0 ..= 1.0); non-zero after a speed or voice change mid-sentence.
     resume_fraction: f64,
@@ -408,6 +417,7 @@ impl Worker {
                 Err(flume::RecvTimeoutError::Timeout) => {}
             }
             self.tick();
+            self.line_up_next();
             self.publish();
         }
     }
@@ -416,7 +426,55 @@ impl Worker {
         (self.idx, rate_key(self.rate))
     }
 
+    /// The output has moved on to the sentence we lined up: follow it.
+    fn follow_output(&mut self) {
+        if let Some((generation, key, audio)) = self.queued.take() {
+            self.idx = key.0;
+            self.loaded = Some((generation, key, audio));
+            self.resume_fraction = 0.0;
+            self.schedule();
+        }
+    }
+
+    /// Take back the lined-up sentence before changing course. If the output
+    /// got to it first, we are simply one sentence further along.
+    fn settle_queue(&mut self) {
+        if self.queued.is_none() {
+            return;
+        }
+        if self.out.clear_next() {
+            self.queued = None;
+        } else {
+            self.out.advanced();
+            self.follow_output();
+        }
+    }
+
+    /// Hand the output the sentence after the current one, if it is ready,
+    /// so the transition happens inside the audio stream.
+    fn line_up_next(&mut self) {
+        if !self.active || self.queued.is_some() {
+            return;
+        }
+        let Some((generation, key, audio)) = &self.loaded else {
+            return;
+        };
+        // Only behind audio that reflects the current speed and voice.
+        if *generation != self.generation || *key != self.key() {
+            return;
+        }
+        let next_key = (self.idx + 1, key.1);
+        let Some(next) = self.cache.get(&next_key) else {
+            return;
+        };
+        if next.sample_rate == audio.sample_rate && self.out.queue_next(next.clone()) {
+            self.queued = Some((self.generation, next_key, next.clone()));
+        }
+    }
+
     fn handle(&mut self, command: Command) {
+        // Every command may change what should come next.
+        self.settle_queue();
         match command {
             Command::Speak { utterances, title } => {
                 self.invalidate();
@@ -482,7 +540,17 @@ impl Worker {
                     self.start_current(0.0, true);
                 }
             }
-            Command::NudgeRate(steps) => self.set_rate(self.rate + steps as f32 * RATE_STEP),
+            Command::NudgeRate(steps) => {
+                // To the next step of the grid in that direction, so a speed
+                // typed into the settings (say 1.1) joins the grid again.
+                let grid = self.rate / RATE_STEP;
+                let from = if steps > 0 {
+                    (grid + 1e-3).floor()
+                } else {
+                    (grid - 1e-3).ceil()
+                };
+                self.set_rate((from + steps as f32) * RATE_STEP);
+            }
             Command::SetRate(rate) => self.set_rate(rate),
             Command::Configure(config) => {
                 let fraction = self.current_fraction();
@@ -534,6 +602,7 @@ impl Worker {
         self.active = false;
         self.paused = false;
         self.loaded = None;
+        self.queued = None;
         self.resume_fraction = 0.0;
         self.out.stop();
         self.jobs.set(Vec::new());
@@ -549,6 +618,9 @@ impl Worker {
     fn start_current(&mut self, fraction: f64, interrupt: bool) {
         let key = self.key();
         self.resume_fraction = fraction;
+        if self.queued.take().is_some() {
+            self.out.clear_next();
+        }
         match self.cache.get(&key).cloned() {
             Some(audio) => {
                 let mut start = (fraction * audio.samples.len() as f64) as usize;
@@ -678,10 +750,20 @@ impl Worker {
     }
 
     fn tick(&mut self) {
+        // The seamless path: the output already carried on by itself.
+        if self.queued.is_some() && self.out.advanced() {
+            self.follow_output();
+        }
         if self.active && !self.paused && self.loaded.is_some() && self.out.finished() {
             if self.idx + 1 < self.playlist.len() {
                 self.idx += 1;
                 self.start_current(0.0, true);
+                if self.loaded.is_none() {
+                    log::info!(
+                        "sentence {} was not ready in time; waiting for the speech engine",
+                        self.idx + 1
+                    );
+                }
             } else {
                 self.halt();
                 self.idx = 0;

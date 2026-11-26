@@ -59,6 +59,12 @@ enum Command {
     Engines,
     /// Show how text would be split and spoken, without speaking it.
     Explain(TextSource),
+    /// Measure how fast the speech engine is compared to playback.
+    ///
+    /// If reading pauses between sentences, this tells whether the engine
+    /// is the reason. Uses the given text (or `--file`, `--file -` for
+    /// standard input), or a built-in sample.
+    Benchmark(TextSource),
 }
 
 #[derive(Args)]
@@ -92,6 +98,11 @@ struct SpeakArgs {
 }
 
 impl TextSource {
+    /// No text and no file were given on the command line.
+    fn is_absent(&self) -> bool {
+        self.file.is_none() && self.text.is_empty()
+    }
+
     fn read(&self) -> Result<String> {
         if let Some(path) = &self.file {
             if path.as_os_str() == "-" {
@@ -203,6 +214,15 @@ fn dispatch(cli: Cli) -> Result<()> {
             headless::list_voices(&settings)
         }
         Command::Engines => headless::list_engines(&load_settings(&settings_path)),
+        Command::Benchmark(source) => {
+            let settings = load_settings(&settings_path);
+            let text = if source.is_absent() {
+                headless::BENCHMARK_SAMPLE.to_string()
+            } else {
+                source.read()?
+            };
+            headless::benchmark(&settings, &text)
+        }
         Command::Explain(source) => {
             let settings = load_settings(&settings_path);
             headless::explain(&settings, &source.read()?);
