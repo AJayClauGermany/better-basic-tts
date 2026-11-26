@@ -1,25 +1,25 @@
-use gpui_kit::component::{
-    button::{Button, ButtonVariants},
-    label::Label,
-};
-use gpui_kit::*;
+//! Better Basic TTS — a simple, local text-to-speech controller.
+//!
+//! Without arguments this opens the control panel. With a subcommand it
+//! remote-controls the running instance (or, for `speak`, starts one), which
+//! is what desktop-level shortcut settings can call. See `--help`.
 
-struct HelloWorld;
+// No console window when started from the Windows shell.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-impl Render for HelloWorld {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .child(Label::new("Hello, World!"))
-            .child(Button::new("hello").primary().label("Click me"))
-    }
-}
+mod assets;
+mod cli;
+mod gui;
+mod headless;
+mod state;
+mod ui;
 
-fn main() {
-    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(|cx| {
-        init(cx);
-        open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| HelloWorld))
-            .expect("Failed to open window");
-    });
+/// Identifies our windows to the desktop environment.
+pub const APP_ID: &str = "better-basic-tts";
+
+fn main() -> std::process::ExitCode {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .format_timestamp(None)
+        .init();
+    cli::run()
 }

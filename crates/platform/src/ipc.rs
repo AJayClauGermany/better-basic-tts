@@ -84,7 +84,13 @@ fn socket_path() -> std::path::PathBuf {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    dir.join(format!("better-basic-tts-{user}.sock"))
+    let path = dir.join(format!("better-basic-tts-{user}.sock"));
+    // Socket paths are limited to roughly 100 bytes; fall back to /tmp for
+    // unusually deep runtime directories.
+    if path.as_os_str().len() > 96 {
+        return std::path::PathBuf::from(format!("/tmp/better-basic-tts-{user}.sock"));
+    }
+    path
 }
 
 #[cfg(unix)]

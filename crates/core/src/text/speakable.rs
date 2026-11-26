@@ -154,13 +154,18 @@ impl Speakable {
         let mut text = sentence.to_string();
 
         // 1. URLs (before brackets so that <https://autolinks> work).
-        text = match self.urls {
-            UrlMode::Full => URL.replace_all(&text, "$1").into_owned(),
-            UrlMode::Skip => URL.replace_all(&text, " link ").into_owned(),
-            UrlMode::Domain => URL
-                .replace_all(&text, |c: &Captures| format!(" {} link ", domain_of(&c[1])))
-                .into_owned(),
-        };
+        text = URL
+            .replace_all(&text, |c: &Captures| {
+                // Sentence punctuation right after a URL is not part of it.
+                let url = c[1].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+                let trailing = &c[1][url.len()..];
+                match self.urls {
+                    UrlMode::Full => format!("{url}{trailing}"),
+                    UrlMode::Skip => format!(" link{trailing} "),
+                    UrlMode::Domain => format!(" {} link{trailing} ", domain_of(url)),
+                }
+            })
+            .into_owned();
 
         // 2. User substitutions see the text as written.
         for (re, replacement, roles) in &self.substitutions {
@@ -403,6 +408,7 @@ mod tests {
             "See example.com link for more."
         );
         assert_eq!(smart("<https://rust-lang.org>"), "rust-lang.org link");
+        assert_eq!(smart("Docs: https://docs.rs/regex."), "Docs: docs.rs link.");
         let full = make_speakable(
             "at http://a.b/c now",
             Role::Paragraph,

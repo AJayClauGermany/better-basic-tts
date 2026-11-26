@@ -34,8 +34,6 @@ pub struct Settings {
     pub sentence_pause_ms: u32,
     /// Keep the control window above other windows.
     pub always_on_top: bool,
-    /// Bring the control window forward when a global shortcut starts speech.
-    pub show_on_speak: bool,
     pub shortcuts: Shortcuts,
     /// Per-role voices and pacing ("read headings with another voice").
     pub roles: RoleStyles,
@@ -59,7 +57,6 @@ impl Default for Settings {
             urls: UrlMode::Domain,
             sentence_pause_ms: 90,
             always_on_top: true,
-            show_on_speak: true,
             shortcuts: Shortcuts::default(),
             roles: RoleStyles::default(),
             substitutions: Vec::new(),
