@@ -1,7 +1,9 @@
 //! The settings window. Everything that is not needed at a glance lives here.
 
 use crate::state::{self, Tts};
-use bbtts_core::settings::{RoleStyle, Settings as TtsSettings, MAX_RATE, MIN_RATE, RATE_STEP};
+use bbtts_core::settings::{
+    Appearance, RoleStyle, Settings as TtsSettings, MAX_RATE, MIN_RATE, RATE_STEP,
+};
 use bbtts_core::text::{AngleBrackets, InterpreterKind, UrlMode};
 use bbtts_core::Role;
 use bbtts_platform::hotkeys::Action as Do;
@@ -120,6 +122,14 @@ fn url_key(v: UrlMode) -> &'static str {
         UrlMode::Domain => "domain",
         UrlMode::Full => "full",
         UrlMode::Skip => "skip",
+    }
+}
+
+fn appearance_key(v: Appearance) -> &'static str {
+    match v {
+        Appearance::System => "system",
+        Appearance::Light => "light",
+        Appearance::Dark => "dark",
     }
 }
 
@@ -555,7 +565,22 @@ fn general_page(cx: &App) -> SettingPage {
     SettingPage::new("General")
         .icon(Icon::new(IconName::Settings))
         .group(
-            SettingGroup::new().title("Window").item(
+            SettingGroup::new()
+                .title("Window")
+                .item(SettingItem::new(
+                    "Appearance",
+                    SettingField::dropdown(
+                        options(&Appearance::ALL, appearance_key, Appearance::label),
+                        get(|s| appearance_key(s.appearance).into()),
+                        set(|s, v: SharedString| {
+                            if let Some(k) = from_key(&Appearance::ALL, appearance_key, &v) {
+                                s.appearance = k;
+                            }
+                        }),
+                    )
+                    .default_value("system"),
+                ))
+                .item(
                 SettingItem::new(
                     "Keep on top",
                     SettingField::switch(

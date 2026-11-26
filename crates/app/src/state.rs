@@ -21,6 +21,8 @@ pub enum Event {
     Ipc(Request),
     /// A background capture of the selection / clipboard finished.
     Captured(Result<Captured, String>),
+    /// The voices of an engine were listed (engine id, voices).
+    Voices(String, Vec<Voice>),
 }
 
 pub struct Tts {
@@ -53,15 +55,28 @@ impl Tts {
         PlayerConfig::from_settings(&self.settings, self.registry.resolve(&self.settings.engine))
     }
 
+    /// List the active engine's voices in the background: a neural engine
+    /// may need seconds to load before it can answer.
     fn reload_voices(&mut self) {
-        self.voices = match self.registry.resolve(&self.settings.engine) {
-            Some(engine) => engine.voices().unwrap_or_else(|e| {
+        self.voices.clear();
+        let Some(engine) = self.registry.resolve(&self.settings.engine) else {
+            return;
+        };
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let mut voices = engine.voices().unwrap_or_else(|e| {
                 log::warn!("could not list voices: {e:#}");
                 Vec::new()
-            }),
-            None => Vec::new(),
-        };
-        self.voices.sort_by_key(|v| v.label().to_lowercase());
+            });
+            voices.sort_by_key(|v| v.label().to_lowercase());
+            let _ = events.send(Event::Voices(engine.id().to_string(), voices));
+        });
+    }
+
+    fn active_engine_id(&self) -> Option<String> {
+        self.registry
+            .resolve(&self.settings.engine)
+            .map(|e| e.id().to_string())
     }
 
     fn apply_hotkeys(&mut self) {
@@ -156,6 +171,7 @@ pub fn init(settings_path: PathBuf, cx: &mut App) {
         log::warn!("{problem}");
     }
     cx.set_global(tts);
+    apply_appearance(cx);
 
     cx.spawn(async move |cx: &mut AsyncApp| {
         while let Ok(event) = rx.recv_async().await {
@@ -203,6 +219,13 @@ fn handle_event(event: Event, cx: &mut App) {
                 Request::Faster => perform(Action::Faster, cx),
             }
             return;
+        }
+        Event::Voices(engine_id, voices) => {
+            let tts = cx.global_mut::<Tts>();
+            // Ignore answers for an engine the user has since switched away from.
+            if tts.active_engine_id().as_deref() == Some(engine_id.as_str()) {
+                tts.voices = voices;
+            }
         }
         Event::Captured(result) => match result {
             Ok(captured) => {
@@ -290,6 +313,18 @@ pub fn show_panel(cx: &mut App) {
     }
 }
 
+/// Switch between light and dark according to the settings.
+pub fn apply_appearance(cx: &mut App) {
+    use bbtts_core::settings::Appearance;
+    use gpui_kit::component::{Theme, ThemeMode};
+    match cx.global::<Tts>().settings.appearance {
+        Appearance::System => Theme::sync_system_appearance(None, cx),
+        Appearance::Light => Theme::change(ThemeMode::Light, None, cx),
+        Appearance::Dark => Theme::change(ThemeMode::Dark, None, cx),
+    }
+    cx.refresh_windows();
+}
+
 /// Keep the control panel above other windows, or stop doing so.
 ///
 /// Windows and X11 are handled here; on macOS the panel is created as a
@@ -323,17 +358,12 @@ pub fn update_settings(cx: &mut App, change: impl FnOnce(&mut Settings)) {
         return;
     }
     if tts.settings.engine != before.engine {
-        tts.reload_voices();
-        // A voice id from another engine means nothing here.
-        if !tts.voices.iter().any(|v| v.id == tts.settings.voice) {
-            tts.settings.voice.clear();
-        }
+        // Voice ids from another engine mean nothing to the new one.
+        tts.settings.voice.clear();
         for role in bbtts_core::Role::ALL {
-            let style = tts.settings.roles.get_mut(role);
-            if !tts.voices.iter().any(|v| v.id == style.voice) {
-                style.voice.clear();
-            }
+            tts.settings.roles.get_mut(role).voice.clear();
         }
+        tts.reload_voices();
     }
     if tts.settings.shortcuts != before.shortcuts {
         tts.apply_hotkeys();
@@ -350,9 +380,13 @@ pub fn update_settings(cx: &mut App, change: impl FnOnce(&mut Settings)) {
         tts.player.configure(tts.player_config());
     }
     let on_top_changed = tts.settings.always_on_top != before.always_on_top;
+    let appearance_changed = tts.settings.appearance != before.appearance;
     save(tts);
     if on_top_changed {
         apply_always_on_top(cx);
+    }
+    if appearance_changed {
+        apply_appearance(cx);
     }
     cx.refresh_windows();
 }

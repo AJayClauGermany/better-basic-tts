@@ -14,6 +14,7 @@ use bbtts_core::Status;
 use bbtts_platform::hotkeys::Action as Do;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -294,6 +295,11 @@ impl Render for Panel {
                             })
                             .child(status_text),
                     )
+                    .when(snap.status == Status::Loading, |this| {
+                        // The engine is preparing the sentence (a neural
+                        // model may take a few seconds the first time).
+                        this.child(Spinner::new().small().color(theme.muted_foreground))
+                    })
                     .when_some(counter, |this, counter| {
                         this.child(
                             div()

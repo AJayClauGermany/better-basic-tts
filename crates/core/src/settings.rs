@@ -9,6 +9,29 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Light or dark windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Appearance {
+    /// Follow the operating system.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::System => "Same as system",
+            Appearance::Light => "Light",
+            Appearance::Dark => "Dark",
+        }
+    }
+}
+
 pub const MIN_RATE: f32 = 0.5;
 pub const MAX_RATE: f32 = 4.0;
 pub const RATE_STEP: f32 = 0.1;
@@ -34,6 +57,8 @@ pub struct Settings {
     pub sentence_pause_ms: u32,
     /// Keep the control window above other windows.
     pub always_on_top: bool,
+    /// Light or dark windows.
+    pub appearance: Appearance,
     pub shortcuts: Shortcuts,
     /// Per-role voices and pacing ("read headings with another voice").
     pub roles: RoleStyles,
@@ -57,6 +82,7 @@ impl Default for Settings {
             urls: UrlMode::Domain,
             sentence_pause_ms: 90,
             always_on_top: true,
+            appearance: Appearance::System,
             shortcuts: Shortcuts::default(),
             roles: RoleStyles::default(),
             substitutions: Vec::new(),

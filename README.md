@@ -4,13 +4,9 @@ A small, local, cross-platform text-to-speech controller modelled on the classic
 macOS speech panel: **slower · back · play/pause · stop · forward · faster**, and
 nothing else you have to learn.
 
-```
-┌────────────────────────────────────────────────┐
-│ ✕            TextEdit               1.2×   ⚙   │
-│ [🐢]  [⏪]  [⏯]  [⏹]  [⏩]  [🐇]                │
-│ The sentence being read right now…      3 / 42 │
-└────────────────────────────────────────────────┘
-```
+![The control panel, dark](docs/screenshots/panel-dark.png)
+
+![The control panel, light](docs/screenshots/panel-light.png)
 
 - **Local only.** Speech is produced on your machine by the voices that ship with
   the operating system (or any local engine you plug in). Nothing is sent anywhere.
@@ -47,7 +43,9 @@ Start `better-basic-tts`. A small panel appears.
 | 🐇 | faster | `↑` or `=` |
 
 Paste (`Ctrl+V` / `⌘V`) into the panel to read the clipboard. The gear opens the
-settings.
+settings:
+
+![Settings: per-role voices](docs/screenshots/settings-roles.png)
 
 ### Global shortcuts
 
@@ -155,6 +153,7 @@ speak the small JSON line protocol described in
 Everything lives in one TOML file, and most of it is editable in the settings window.
 
 ```toml
+appearance = "system"      # system | light | dark
 engine = "auto"            # or "say", "winrt", "espeak", or one of yours
 voice = ""                 # empty = the engine's default voice
 rate = 1.2
